@@ -38,8 +38,11 @@ def run_pytorch():
     x4 = x3 / b
     
     # activations
+    x5 = torch.tanh(x4)
+    x6 = torch.exp(x5)
+    x7 = torch.relu(x6)
     
-    L = x4**2
+    L = x7**2
     
     L.backward()
     

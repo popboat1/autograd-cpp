@@ -1,5 +1,6 @@
 #include "Value.h"
 #include <cmath>
+#include <algorithm>
 
 Value::Value(double val) : data(val), grad(0.0), op(""), backward_func([](){}) {}
 
@@ -66,6 +67,70 @@ ValuePtr Value::pow(double exponent){
 // division op
 ValuePtr operator/(const ValuePtr& lhs, const ValuePtr& rhs){
     return lhs * rhs->pow(-1.0);
+}
+
+// tanh function
+ValuePtr Value::tanh(){
+    auto out_data = std::tanh(this->data);
+
+    auto out = std::make_shared<Value>(
+        out_data,
+        std::set<ValuePtr>{shared_from_this()},
+        "tanh(" + std::to_string(this->data) + ")"
+    );
+
+    // backward pass
+    // d/dx tanh(x) = 1 - tanh^2(x)
+    auto self = shared_from_this();
+    out->backward_func = [self, out_data, out](){
+        double local_derivative = 1.0 - std::pow(out_data, 2);
+
+        self->grad += local_derivative * out->grad;
+    };
+
+    return out;
+}
+
+// exp function
+ValuePtr Value::exp(){
+    auto out_data = std::exp(this->data);
+
+    auto out = std::make_shared<Value>(
+        out_data,
+        std::set<ValuePtr>{shared_from_this()},
+        "exp(" + std::to_string(this->data) + ")"
+    );
+
+    // backward pass
+    // d/dx exp(x) = exp(x)
+    auto self = shared_from_this();
+    out->backward_func = [self, out_data, out](){
+        self->grad += out->data * out->grad;
+    };
+
+    return out;
+}
+
+// relu function
+ValuePtr Value::relu(){
+    auto out_data = std::max(0.0, this->data);
+
+    auto out = std::make_shared<Value>(
+        out_data,
+        std::set<ValuePtr>{shared_from_this()},
+        "relu(" + std::to_string(this->data) + ")"
+    );
+
+    // backward pass
+    // d/dx relu() -> 1.0 if positive otherwise 0.0
+    auto self = shared_from_this();
+    out->backward_func = [self, out_data, out](){
+        double local_derivative = self->data > 0 ? 1.0 : 0.0;
+
+        self->grad += local_derivative * out->grad;
+    };
+
+    return out;
 }
 
 // topological sort to execute backward pass sequentially

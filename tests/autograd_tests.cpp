@@ -35,14 +35,61 @@ void test_subtraction_and_division() {
     auto L = (a - b) / b; // (10 - 2) / 2 = 4.0
     L->backward();
 
+    assert(is_close(L->grad, 1.0));
     assert(is_close(L->data, 4.0));
+
+    // dL/da = 1/b = 1/2 = 0.5
+    assert(is_close(a->grad, 0.5));
+    // dL/db = -a/(b^2) = -10/4 = -2.5
+    assert(is_close(b->grad, -2.5));
     std::cout << "[PASS] Subtraction & Division Test\n";
+}
+
+void test_activation_func() {
+    // tanh()
+    auto a = make_val(2.0);
+    auto L_tanh = a->tanh();
+    L_tanh->backward();
+
+    // tanh(2.0) ≈ 0.96403
+    assert(is_close(L_tanh->data, 0.96402758));
+    // d/dx tanh(2.0) = 1 - tanh^2(2.0) ≈ 0.07065
+    assert(is_close(a->grad, 0.07065082));
+
+    // exp()
+    auto b = make_val(1.0);
+    auto L_exp = b->exp();
+    L_exp->backward();
+    
+    // exp(1.0) ≈ 2.71828
+    assert(is_close(L_exp->data, 2.71828182));
+    // d/dx exp(1.0) = exp(1.0) ≈ 2.71828
+    assert(is_close(b->grad, 2.71828182));
+
+    // relu() positive boundary
+    auto c = make_val(1.5);
+    auto L_relu1 = c->relu();
+    L_relu1->backward();
+    
+    assert(is_close(L_relu1->data, 1.5));
+    assert(is_close(c->grad, 1.0)); // slope is 1.0 for x > 0
+
+    // relu() negative boundary
+    auto d = make_val(-3.0);
+    auto L_relu2 = d->relu();
+    L_relu2->backward();
+    
+    assert(is_close(L_relu2->data, 0.0)); // clamped to 0
+    assert(is_close(d->grad, 0.0)); // slope flatlines to 0.0 for x <= 0
+
+    std::cout << "[PASS] Activation Functions (tanh, exp, relu) Test\n";
 }
 
 int main() {
     std::cout << "running test...\n";
     test_basic_math();
     test_subtraction_and_division();
+    test_activation_func();
     std::cout << "[DONE] test is done!!1!\n";
     return 0;
 }

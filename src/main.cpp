@@ -13,8 +13,11 @@ int main() {
     auto x4 = x3 / b;
 
     // activations
+    auto x5 = x4->tanh();
+    auto x6 = x5->exp();
+    auto x7 = x6->relu();
 
-    auto L  = x4->pow(2);
+    auto L  = x7->pow(2);
 
     // backward pass
     L->backward();
