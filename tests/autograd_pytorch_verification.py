@@ -3,28 +3,53 @@ run a test to verify the cpp autograd engine with
 official pytorch autograd
 """
 
-import subprocess
 import os
+import sys
+
+for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+    if os.path.exists(os.path.join(path_dir, "g++.exe")) or os.path.exists(os.path.join(path_dir, "gcc.exe")):
+        os.add_dll_directory(path_dir)
+        break
+
+script_dir = os.path.dirname(os.path.abspath(__file__))  # framework/tests
+project_root = os.path.dirname(script_dir)              # framework/
+build_dir = os.path.join(project_root, "build")         # framework/build
+
+sys.path.append(build_dir)
+
 import torch
+import autograd_cpp
 
 def run_autograd_cpp():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir)
-    exe_path = os.path.join(project_root, "build", "autograd_main.exe")
+    a = autograd_cpp.make_val(-2.0)
+    b = autograd_cpp.make_val(3.0)
+    c = autograd_cpp.make_val(10.0)
     
-    if not os.path.exists(exe_path):
-        raise FileNotFoundError(f"could not find C++ exec at {exe_path}")
+    a = torch.tensor(-2.0, requires_grad=True)
+    b = torch.tensor(3.0, requires_grad=True)
+    c = torch.tensor(10.0, requires_grad=True)
     
-    # exec the cpp file
-    result = subprocess.run([exe_path], capture_output=True, text=True, check=True)
+    # forward pass (same as main.cpp)
+    x1 = a * b
+    x2 = x1 + c
+    x3 = x2 - a
+    x4 = x3 / b
     
-    # use parsing to get data
-    cpp_data={}
-    for line in result.stdout.strip().split('\n'):
-        if ":" in line:
-            key, val = line.split(":")
-            cpp_data[key.strip()] = float(val.strip())
-    return cpp_data
+    # activations
+    x5 = torch.tanh(x4)
+    x6 = torch.exp(x5)
+    x7 = torch.relu(x6)
+    
+    L = x7**2
+    
+    L.backward()
+    
+    return {
+        "L": L.item(),
+        "da": a.grad.item(),
+        "db": b.grad.item(),
+        "dc": c.grad.item()
+    }
 
 def run_pytorch():
     a = torch.tensor(-2.0, requires_grad=True)
@@ -66,10 +91,10 @@ def main():
     # print side by side comparison
     print(f"{'Metric':<15} | {"c++":<16} | {'pytorch':<16} | {'status'}")
     mappings = [
-        ("Forward Pass L", cpp.get("L"), pt["pytorch_L"]),
-        ("Gradient da", cpp.get("da"), pt["pytorch_da"]),
-        ("Gradient db", cpp.get("db"), pt["pytorch_db"]),
-        ("Gradient dc", cpp.get("dc"), pt["pytorch_dc"]),
+        ("Forward Pass L", cpp["L"], pt["pytorch_L"]),
+        ("Gradient da", cpp["da"], pt["pytorch_da"]),
+        ("Gradient db", cpp["db"], pt["pytorch_db"]),
+        ("Gradient dc", cpp["dc"], pt["pytorch_dc"]),
     ]
     
     all_passed = True
