@@ -1,4 +1,5 @@
 #include "Value.h"
+#include <cmath>
 
 Value::Value(double val) : data(val), grad(0.0), op(""), backward_func([](){}) {}
 
@@ -33,6 +34,38 @@ ValuePtr operator*(const ValuePtr& lhs, const ValuePtr& rhs){
         rhs->grad += lhs->data * out->grad;
     };
     return out;
+}
+
+// substraction op
+ValuePtr operator-(const ValuePtr& lhs, const ValuePtr& rhs){
+    return lhs + (rhs * make_val(-1.0));
+}
+
+// exponents op
+ValuePtr Value::pow(double exponent){
+    double out_data = std::pow(this->data, exponent);
+
+    auto out = std::make_shared<Value>(
+        out_data,
+        std::set<ValuePtr>{shared_from_this()},
+        "pow(" + std::to_string(exponent) + ")"
+    );
+
+    // backward pass
+    // dL/dx = exponent * base^(exponent - 1)
+    auto self = shared_from_this();
+    out->backward_func = [self, exponent, out](){
+        double local_derivative = exponent * std::pow(self->data, exponent - 1);
+
+        self->grad += local_derivative * out->grad;
+    };
+
+    return out;
+}
+
+// division op
+ValuePtr operator/(const ValuePtr& lhs, const ValuePtr& rhs){
+    return lhs * rhs->pow(-1.0);
 }
 
 // topological sort to execute backward pass sequentially

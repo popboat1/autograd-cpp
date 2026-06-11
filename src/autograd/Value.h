@@ -26,9 +26,13 @@ public:
     Value(double val, std::set<ValuePtr> children, std::string operation="");
 
     void backward();
-
+    
+    // lists of operators
     friend ValuePtr operator+(const ValuePtr& lhs, const ValuePtr& rhs);
     friend ValuePtr operator*(const ValuePtr& lhs, const ValuePtr& rhs);
+    friend ValuePtr operator/(const ValuePtr& lhs, const ValuePtr& rhs);
+    friend ValuePtr operator-(const ValuePtr& lhs, const ValuePtr& rhs);
+    ValuePtr pow(double exponent); // declared without friend because I am using this inside Value.cpp
 
     void print() const;
 };
