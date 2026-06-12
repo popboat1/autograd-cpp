@@ -32,12 +32,14 @@ FetchContent_MakeAvailable(pybind11)
 add_executable(autograd_main
     src/main.cpp
     src/autograd/Value.cpp
+    src/nn/Linear.cpp
 )
 
 # compile to python library
 pybind11_add_module(autograd_cpp 
     src/autograd/Value.cpp
     src/autograd/bindings.cpp
+    src/nn/Linear.cpp
 )
 
 target_link_options(autograd_cpp PRIVATE "-static-libgcc" "-static-libstdc++")

@@ -15,9 +15,13 @@ ValuePtr operator+(const ValuePtr& lhs, const ValuePtr& rhs){
     );
 
     //backward pass
-    out->backward_func = [lhs, rhs, out](){
-        lhs->grad += out->grad;
-        rhs->grad += out->grad;
+    std::weak_ptr<Value> weak_out = out; // capture to break the circular reference cycle
+                                         // (out -> backward_func -> out) and prevent memory leaks.
+    out->backward_func = [lhs, rhs, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            lhs->grad += out_ptr->grad;
+            rhs->grad += out_ptr->grad;
+        }
     };
     return out;
 }
@@ -30,9 +34,12 @@ ValuePtr operator*(const ValuePtr& lhs, const ValuePtr& rhs){
     );
 
     // dL/dx = y * dL/dout
-    out->backward_func = [lhs, rhs, out]() {
-        lhs->grad += rhs->data * out->grad;
-        rhs->grad += lhs->data * out->grad;
+    std::weak_ptr<Value> weak_out = out;
+    out->backward_func = [lhs, rhs, weak_out]() {
+        if(auto out_ptr = weak_out.lock()){
+            lhs->grad += rhs->data * out_ptr->grad;
+            rhs->grad += lhs->data * out_ptr->grad;
+        }
     };
     return out;
 }
@@ -55,10 +62,13 @@ ValuePtr Value::pow(double exponent){
     // backward pass
     // dL/dx = exponent * base^(exponent - 1)
     auto self = shared_from_this();
-    out->backward_func = [self, exponent, out](){
-        double local_derivative = exponent * std::pow(self->data, exponent - 1);
+    std::weak_ptr<Value> weak_out = out;
+    out->backward_func = [self, exponent, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            double local_derivative = exponent * std::pow(self->data, exponent - 1);
 
-        self->grad += local_derivative * out->grad;
+            self->grad += local_derivative * out_ptr->grad;
+        }
     };
 
     return out;
@@ -82,10 +92,14 @@ ValuePtr Value::tanh(){
     // backward pass
     // d/dx tanh(x) = 1 - tanh^2(x)
     auto self = shared_from_this();
-    out->backward_func = [self, out_data, out](){
-        double local_derivative = 1.0 - std::pow(out_data, 2);
+    std::weak_ptr<Value> weak_out = out;
+    out->backward_func = [self, out_data, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            double local_derivative = 1.0 - std::pow(out_data, 2);
 
-        self->grad += local_derivative * out->grad;
+            self->grad += local_derivative * out_ptr->grad;
+        }
+
     };
 
     return out;
@@ -104,8 +118,11 @@ ValuePtr Value::exp(){
     // backward pass
     // d/dx exp(x) = exp(x)
     auto self = shared_from_this();
-    out->backward_func = [self, out_data, out](){
-        self->grad += out->data * out->grad;
+    std::weak_ptr<Value> weak_out = out;
+    out->backward_func = [self, out_data, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            self->grad += out_ptr->data * out_ptr->grad;
+        }
     };
 
     return out;
@@ -124,10 +141,13 @@ ValuePtr Value::relu(){
     // backward pass
     // d/dx relu() -> 1.0 if positive otherwise 0.0
     auto self = shared_from_this();
-    out->backward_func = [self, out_data, out](){
-        double local_derivative = self->data > 0 ? 1.0 : 0.0;
+    std::weak_ptr<Value> weak_out = out;
+    out->backward_func = [self, out_data, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            double local_derivative = self->data > 0 ? 1.0 : 0.0;
 
-        self->grad += local_derivative * out->grad;
+            self->grad += local_derivative * out_ptr->grad;
+        }
     };
 
     return out;
