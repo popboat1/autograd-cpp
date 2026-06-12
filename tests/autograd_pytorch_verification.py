@@ -25,10 +25,6 @@ def run_autograd_cpp():
     b = autograd_cpp.make_val(3.0)
     c = autograd_cpp.make_val(10.0)
     
-    a = torch.tensor(-2.0, requires_grad=True)
-    b = torch.tensor(3.0, requires_grad=True)
-    c = torch.tensor(10.0, requires_grad=True)
-    
     # forward pass (same as main.cpp)
     x1 = a * b
     x2 = x1 + c
@@ -36,19 +32,19 @@ def run_autograd_cpp():
     x4 = x3 / b
     
     # activations
-    x5 = torch.tanh(x4)
-    x6 = torch.exp(x5)
-    x7 = torch.relu(x6)
+    x5 = x4.tanh()
+    x6 = x5.exp()
+    x7 = x6.relu()
     
     L = x7**2
     
     L.backward()
     
     return {
-        "L": L.item(),
-        "da": a.grad.item(),
-        "db": b.grad.item(),
-        "dc": c.grad.item()
+        "L": L.data,
+        "da": a.grad,
+        "db": b.grad,
+        "dc": c.grad
     }
 
 def run_pytorch():
