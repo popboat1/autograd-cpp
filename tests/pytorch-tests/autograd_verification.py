@@ -11,10 +11,11 @@ for path_dir in os.environ.get("PATH", "").split(os.pathsep):
         os.add_dll_directory(path_dir)
         break
 
-script_dir = os.path.dirname(os.path.abspath(__file__))  # framework/tests
-project_root = os.path.dirname(script_dir)              # framework/
-build_dir = os.path.join(project_root, "build")         # framework/build
+script_dir = os.path.dirname(os.path.abspath(__file__))   # framework/tests/pytorch
+tests_dir = os.path.dirname(script_dir)                  # framework/tests
+project_root = os.path.dirname(tests_dir)                # framework/
 
+build_dir = os.path.join(project_root, "build")
 sys.path.append(build_dir)
 
 import torch
@@ -74,29 +75,45 @@ def run_pytorch():
         "pytorch_dc": c.grad.item()
     }
     
-def main():
-    print("running pytorch & autograd-cpp verification...")
+def run_requires_grad_cpp():
+    a = autograd_cpp.make_val(2.0, True)
+    b = autograd_cpp.make_val(3.0, False)
     
-    try:
-        cpp = run_autograd_cpp()
-        pt = run_pytorch()
-    except Exception as e:
-        print(f"[ERROR] execution failed: {e}")
-        return
+    c = b * b
+    Loss = a + c
+    Loss.backward()
     
-    # print side by side comparison
-    print(f"{'Metric':<15} | {"c++":<16} | {'pytorch':<16} | {'status'}")
-    mappings = [
-        ("Forward Pass L", cpp["L"], pt["pytorch_L"]),
-        ("Gradient da", cpp["da"], pt["pytorch_da"]),
-        ("Gradient db", cpp["db"], pt["pytorch_db"]),
-        ("Gradient dc", cpp["dc"], pt["pytorch_dc"]),
-    ]
+    return {
+        "Loss": Loss.data,
+        "da": a.grad,
+        "db": b.grad
+    }
+
+def run_requires_grad_pytorch():
+    a = torch.tensor(2.0, requires_grad=True)
+    b = torch.tensor(3.0, requires_grad=False)
+    
+    c = b * b
+    Loss = a + c
+    Loss.backward()
+    
+    b_grad_val = 0.0 if b.grad is None else b.grad.item()
+    
+    return {
+        "pytorch_Loss": Loss.item(),
+        "pytorch_da": a.grad.item(),
+        "pytorch_db": b_grad_val
+    }
+    
+def print_table(title, mappings):
+    print(f"\n--- {title} ---")
+    print(f"{'metric Node':<20} | {'autograd-cpp':<16} | {'pytorch':<16} | {'status'}")
+    print("-" * 75)
     
     all_passed = True
     for metric, cpp_val, pt_val in mappings:
         if cpp_val is None:
-            print(f"[ERROR] missing data for {metric}")
+            print(f"[ERROR] missing data tracking block for: {metric}")
             all_passed = False
             continue
         
@@ -105,9 +122,41 @@ def main():
         if not match:
             all_passed = False
             
-        print(f"{metric:<15} | {cpp_val:<16.4f} | {pt_val:<16.4f} | {status}")
+        print(f"{metric:<20} | {cpp_val:<16.4f} | {pt_val:<16.4f} | {status}")
+    return all_passed
     
-    if all_passed:
+def main():
+    print("running pytorch & autograd-cpp verification...")
+    
+    try:
+        cpp = run_autograd_cpp()
+        pt = run_pytorch()
+        
+        cpp_freeze = run_requires_grad_cpp()
+        pt_freeze = run_requires_grad_pytorch()
+        
+    except Exception as e:
+        print(f"[ERROR] execution failed: {e}")
+        return
+    
+    # print side by side comparison
+    math_mappings = [
+        ("Forward Pass L", cpp["L"], pt["pytorch_L"]),
+        ("Gradient da", cpp["da"], pt["pytorch_da"]),
+        ("Gradient db", cpp["db"], pt["pytorch_db"]),
+        ("Gradient dc", cpp["dc"], pt["pytorch_dc"]),
+    ]
+    
+    freeze_mappings = [
+        ("Mixed Pass Loss", cpp_freeze["Loss"], pt_freeze["pytorch_Loss"]),
+        ("Tracking Node da", cpp_freeze["da"], pt_freeze["pytorch_da"]),
+        ("Frozen Node db", cpp_freeze["db"], pt_freeze["pytorch_db"]),
+    ]
+    
+    math_success = print_table("core math graphs", math_mappings)
+    freeze_success = print_table("graphs freezing", freeze_mappings)
+    
+    if math_success and freeze_success:
         print("[SUCCESS] the autograd c++ engine matches pytorch!1!!")
     else:
         print("[ERROR] gradient mismatched")

@@ -6,9 +6,11 @@ for path_dir in os.environ.get("PATH", "").split(os.pathsep):
         os.add_dll_directory(path_dir)
         break
 
-script_dir = os.path.dirname(os.path.abspath(__file__))  # framework/tests
-project_root = os.path.dirname(script_dir)              # framework/
-build_dir = os.path.join(project_root, "build")         # framework/build
+script_dir = os.path.dirname(os.path.abspath(__file__))   # framework/tests/pytorch
+tests_dir = os.path.dirname(script_dir)                  # framework/tests
+project_root = os.path.dirname(tests_dir)                # framework/
+
+build_dir = os.path.join(project_root, "build")
 sys.path.append(build_dir)
 
 import torch

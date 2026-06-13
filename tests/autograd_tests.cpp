@@ -29,6 +29,26 @@ void test_basic_math(){
     std::cout << "[PASS] Basic Scalar Math & Gradient Test\n";
 }
 
+void test_requires_grad(){
+    auto a = make_val(2.0, true);
+    auto b = make_val(2.0, false);
+
+    // propagation on a completely frozen branch
+    auto c = b * b;
+    assert(c->requires_grad == false); // both children false -> false
+
+    // propagation on a mixed branch
+    auto loss = a + c;
+    assert(loss->requires_grad == true); // 1 child true -> true
+
+    loss->backward();
+
+    assert(is_close(a->grad, 1.0));
+    assert(is_close(b->grad, 0.0));
+
+    std::cout << "[PASS] Requires Grad Tests\n";
+}
+
 void test_subtraction_and_division() {
     auto a = make_val(10.0);
     auto b = make_val(2.0);
@@ -123,6 +143,7 @@ int main() {
     test_basic_math();
     test_subtraction_and_division();
     test_activation_func();
+    test_requires_grad();
     test_linear_layer();
     std::cout << "[DONE] test is done!!1!\n";
     return 0;
