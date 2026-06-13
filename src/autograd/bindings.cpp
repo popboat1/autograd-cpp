@@ -2,6 +2,8 @@
 #include <pybind11/stl.h>
 #include "Value.h"
 #include "nn/Linear.h"
+#include "nn/MLP.h"
+#include "optim/SGD.h"
 
 namespace py = pybind11;
 
@@ -34,4 +36,24 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("parameters", &Linear::parameters);
 
     m.def("make_val", &make_val, py::arg("val"), py::arg("requires_grad") = true, "helper function to generate a shared_ptr node");
+
+    py::class_<MLP>(m, "MLP")
+        .def(py::init<int, std::vector<int>, std::string, int>(), 
+             py::arg("fan_in"), 
+             py::arg("hidden_sizes"), 
+             py::arg("activation_layer") = "", 
+             py::arg("seed") = 42)
+        .def("forward", &MLP::forward)
+        .def("parameters", &MLP::parameters);
+    
+    auto m_optim = m.def_submodule("optim", "optimization sub-algorithms manager");
+
+    py::class_<SGD>(m_optim, "SGD")
+        .def(py::init<std::vector<ValuePtr>, double, double, double>(),
+             py::arg("params"),
+             py::arg("lr"),
+             py::arg("momentum") = 0.0,
+             py::arg("weight_decay") = 0.0)
+        .def("step", &SGD::step)
+        .def("zero_grad", &SGD::zero_grad);
 }
