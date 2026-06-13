@@ -3,6 +3,7 @@
 #include "autograd/Value.h"
 #include "nn/MLP.h"
 #include "optim/SGD.h"
+#include "nn/Loss.h"
 
 int main() {
     // mock input features (3 items) and a target scalar label
@@ -10,11 +11,11 @@ int main() {
     auto target = make_val(1.0); //  we want out net to learn output of 1.0
 
     // MLP: 3 inputs -> hidden sizes [4, 2] -> 1 final output
-    // Uses "relu" hidden activations and an empty string "" for raw output pass-through
     MLP model(3, {4, 2, 1}, "relu", 42);
 
     // SGD optimizer with learning_rate=0.05, momentum=0.9, weight_decay=1e-4
     SGD optimizer(model.parameters(), 0.05, 0.9, 1e-4);
+    MSELoss loss_fn;
 
     auto sample_param = model.parameters()[0];
     std::cout << "total model parameters registered: " << model.parameters().size() << "\n";
@@ -25,8 +26,7 @@ int main() {
         auto outs = model.forward(inputs);
         auto pred = outs[0];
 
-        auto diff = pred - target;
-        auto loss = diff->pow(2);
+        auto loss = loss_fn({pred}, {target});
 
         loss->backward();
 
