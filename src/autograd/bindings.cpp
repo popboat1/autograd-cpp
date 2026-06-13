@@ -9,9 +9,11 @@ PYBIND11_MODULE(autograd_cpp, m) {
     m.doc() = "C++ Autograd Engine Python Bindings";
 
     py::class_<Value, std::shared_ptr<Value>>(m, "Value")
+        .def(py::init<double, bool>(), py::arg("val"), py::arg("requires_grad") = true)
         .def_readwrite("data", &Value::data)
         .def_readwrite("grad", &Value::grad)
         .def_readwrite("op", &Value::op)
+        .def_property_readonly("requires_grad", [](const ValuePtr& self) { return self->requires_grad; })
         
         .def("backward", &Value::backward)
         .def("pow", &Value::pow)
@@ -31,5 +33,5 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("forward", &Linear::forward)
         .def("parameters", &Linear::parameters);
 
-    m.def("make_val", &make_val, "Helper function to generate a shared_ptr node");
+    m.def("make_val", &make_val, py::arg("val"), py::arg("requires_grad") = true, "helper function to generate a shared_ptr node");
 }

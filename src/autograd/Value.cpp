@@ -2,10 +2,16 @@
 #include <cmath>
 #include <algorithm>
 
-Value::Value(double val) : data(val), grad(0.0), op(""), backward_func([](){}) {}
+Value::Value(double val, bool requires_grad) : data(val), requires_grad(requires_grad), grad(0.0), op(""), backward_func([](){}) {}
 
 Value::Value(double val, std::set<ValuePtr> children, std::string operation)
-    : data(val), grad(0.0), prev(children), op(operation), backward_func([](){}){}
+    : data(val), requires_grad(false), grad(0.0), prev(children), op(operation), backward_func([](){}){
+        for(auto child : children){
+            if(child->requires_grad == true){
+                this->requires_grad = true;
+            }
+        }
+    }
 
 // addition op
 ValuePtr operator+(const ValuePtr& lhs, const ValuePtr& rhs){
@@ -174,7 +180,9 @@ void Value::backward(){
 
     // process nodes in reverse topo order
     for(auto it = topo.rbegin(); it != topo.rend(); ++it){
-        (*it)->backward_func();
+        if((*it)->requires_grad == true){
+            (*it)->backward_func();
+        }
     }
 }
 

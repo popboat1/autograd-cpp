@@ -17,12 +17,14 @@ public:
     double grad;
     std::string op;
 
+    bool requires_grad = true;
+
     std::set<ValuePtr> prev; // set of pointers to parent nodes that created this Value
 
     std::function<void()> backward_func; // lambda function to pass grads back to parents
 
     //constructors
-    Value(double val);
+    Value(double val, bool requires_grad=true);
     Value(double val, std::set<ValuePtr> children, std::string operation="");
 
     void backward();
@@ -42,8 +44,8 @@ public:
     void print() const;
 };
 
-inline ValuePtr make_val(double val){
-    return std::make_shared<Value>(val);
+inline ValuePtr make_val(double val, bool requires_grad=true){
+    return std::make_shared<Value>(val, requires_grad);
 }
 
 #endif
