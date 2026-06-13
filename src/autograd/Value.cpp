@@ -174,7 +174,9 @@ ValuePtr Value::log() {
 
     out->backward_func = [self, weak_out]() {
         if (auto out_ptr = weak_out.lock()){
-            
+            double local_derivative = 1.0 / self->data;
+
+            self->grad += local_derivative * out_ptr->grad;
         }
     };
 
