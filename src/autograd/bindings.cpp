@@ -4,6 +4,7 @@
 #include "nn/Linear.h"
 #include "nn/MLP.h"
 #include "optim/SGD.h"
+#include "nn/Loss.h"
 
 namespace py = pybind11;
 
@@ -56,4 +57,12 @@ PYBIND11_MODULE(autograd_cpp, m) {
              py::arg("weight_decay") = 0.0)
         .def("step", &SGD::step)
         .def("zero_grad", &SGD::zero_grad);
+    
+    py::class_<MSELoss>(m, "MSELoss")
+        .def(py::init<>())
+        .def("__call__", &MSELoss::operator());
+
+    py::class_<CrossEntropyLoss>(m, "CrossEntropyLoss")
+        .def(py::init<>())
+        .def("__call__", &CrossEntropyLoss::operator());
 }

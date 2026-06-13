@@ -164,7 +164,7 @@ ValuePtr Value::log() {
     double out_data = std::log(this->data);
 
     auto out = std::make_shared<Value>(
-        std::log(data), requires_grad,
+        std::log(data),
         std::set<ValuePtr>{shared_from_this()},
         "log(" + std::to_string(this->data) + ")"
     );
