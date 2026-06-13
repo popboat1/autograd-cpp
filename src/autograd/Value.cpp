@@ -159,6 +159,28 @@ ValuePtr Value::relu(){
     return out;
 }
 
+// log function
+ValuePtr Value::log() {
+    double out_data = std::log(this->data);
+
+    auto out = std::make_shared<Value>(
+        std::log(data), requires_grad,
+        std::set<ValuePtr>{shared_from_this()},
+        "log(" + std::to_string(this->data) + ")"
+    );
+    
+    auto self = shared_from_this();
+    std::weak_ptr<Value> weak_out = out;
+
+    out->backward_func = [self, weak_out]() {
+        if (auto out_ptr = weak_out.lock()){
+            
+        }
+    };
+
+    return out;
+}
+
 // topological sort to execute backward pass sequentially
 void Value::backward(){
     std::vector<ValuePtr> topo;

@@ -35,6 +35,7 @@ public:
     friend ValuePtr operator/(const ValuePtr& lhs, const ValuePtr& rhs);
     friend ValuePtr operator-(const ValuePtr& lhs, const ValuePtr& rhs);
     ValuePtr pow(double exponent); // declared without friend because I am using this inside Value.cpp
+    ValuePtr log();
 
     // activation functions
     ValuePtr tanh();
