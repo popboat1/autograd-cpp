@@ -35,6 +35,7 @@ add_executable(autograd_main
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
+    src/nn/Loss.cpp
 )
 
 # compile to python library
@@ -44,6 +45,7 @@ pybind11_add_module(autograd_cpp
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
+    src/nn/Loss.cpp
 )
 
 target_link_options(autograd_cpp PRIVATE "-static-libgcc" "-static-libstdc++")
