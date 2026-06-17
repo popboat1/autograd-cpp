@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 project(CppMLFramework LANGUAGES CXX)
 
+# trigger GitHub linguist recalculation
 # silence deprecation warnings triggered by third-party libraries
 set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
 
