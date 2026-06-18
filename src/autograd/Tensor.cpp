@@ -49,7 +49,7 @@ size_t Tensor::get_flat_index(const std::vector<size_t>& indices) const {
     }
 
     size_t flat_idx = 0;
-    for (size_t i {0}; i < indices.size(); ++i){
+    for (size_t i {0}; i < indices.size(); ++i){    
         if(indices[i] >= shape[i]){
             throw std::out_of_range("tensor index out of bounds");
         }
@@ -60,7 +60,7 @@ size_t Tensor::get_flat_index(const std::vector<size_t>& indices) const {
 
 // matmul op
 // TODO: implement batched matmul to support N-dimensional tensors
-static TensorPtr matmul(const TensorPtr& lhs, const TensorPtr& rhs){
+TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     // verify dimensions
     if (lhs->shape.size() != 2 || rhs->shape.size() != 2){
         throw std::invalid_argument("both inputs must be 2d matrices.");
@@ -131,3 +131,70 @@ static TensorPtr matmul(const TensorPtr& lhs, const TensorPtr& rhs){
 }
 
 // TODO: implement backward func, transpose, sum, addition, substrac, and etc...
+TensorPtr Tensor::transpose() {
+    if(shape.size() != 2){
+        throw std::invalid_argument("transpose error");
+    }
+
+    // create swapped shape and size configs
+    std::vector<size_t> new_shape = {shape[1], shape[0]};
+    std::vector<size_t> new_strides = {strides[1], strides[0]};
+
+    // build the new output tensor
+    auto out = std::make_shared<Tensor>(data, 
+                                        new_shape, 
+                                        std::set<TensorPtr>{shared_from_this()}, 
+                                        "transpose");
+    out->strides = new_strides; // override default contigous layout strides
+
+    // backward pass
+    // the derivative of a transpose is simply transposing the upstream grads back
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    out->backward_func = [self, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            //map the output tensor gradients back to self using swapped coordinate tracking
+            for(size_t i {0}; i < out_ptr->shape[0]; ++i){
+                for(size_t j {0}; j < out_ptr->shape[1]; ++j){
+                    size_t out_flat = out_ptr->get_flat_index({i, j});
+                    size_t self_flat = self->get_flat_index({j, i});
+                    self->grad[self_flat] += out_ptr->grad[out_flat];
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+
+// backward pass function
+void Tensor::backward() {
+    // build topological sort list
+    std::vector<TensorPtr> topo;
+    std::set<TensorPtr> visited;
+
+    std::function<void(TensorPtr)> build_topo = [&](TensorPtr v) {
+        if(visited.find(v) == visited.end()){
+            visited.insert(v);
+            for(const auto& child : v->prev){
+                build_topo(child);
+            }
+            topo.push_back(v);
+        }
+    };
+
+    build_topo(shared_from_this());
+
+    // out node start with grad 1.0
+    if (!grad.empty()) {
+        std::fill(grad.begin(), grad.end(), 1.0);
+    } 
+
+    // process nodes in reverse topo order
+    for(auto it = topo.rbegin(); it != topo.rend(); ++it){
+        if ((*it)->requires_grad){
+            (*it)->backward_func();
+        }
+    }
+}
