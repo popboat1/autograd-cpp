@@ -126,6 +126,37 @@ int main() {
     assert(close_enough(mat4->grad[3], -1.0));
     std::cout << "element-wise subtraction forward and backward passes verified successfully\n";
 
+    // test 7: checking element-wise multiplication forward and backward passes
+    auto mat5 = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0, 4.0, 5.0}, std::vector<size_t>{2, 2}, true);
+    auto mat6 = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0, 40.0}, std::vector<size_t>{2, 2}, true);
+    auto mul_out = mat5 * mat6;
+    assert(close_enough(mul_out->data[0], 20.0));
+    assert(close_enough(mul_out->data[3], 200.0));
+
+    mul_out->backward();
+    // d(m5*m6)/dm5 = m6 -> grad at 0 is 10.0, grad at 3 is 40.0
+    assert(close_enough(mat5->grad[0], 10.0));
+    assert(close_enough(mat5->grad[3], 40.0));
+    // d(m5*m6)/dm6 = m5 -> grad at 0 is 2.0, grad at 3 is 5.0
+    assert(close_enough(mat6->grad[0], 2.0));
+    assert(close_enough(mat6->grad[3], 5.0));
+    std::cout << "element-wise multiplication forward and backward passes verified successfully\n";
+
+
+    // test 8: checking tensor sum reduction forward and backward passes
+    auto mat_to_sum = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0}, std::vector<size_t>{2, 2}, true);
+    auto sum_out = mat_to_sum->sum();
+    assert(sum_out->shape[0] == 1 && sum_out->shape[1] == 1);
+    assert(close_enough(sum_out->data[0], 10.0)); // 1 + 2 + 3 + 4
+
+    sum_out->backward();
+    // the backward pass must uniformly broadcast the seed 1.0 gradient across all elements
+    assert(close_enough(mat_to_sum->grad[0], 1.0));
+    assert(close_enough(mat_to_sum->grad[1], 1.0));
+    assert(close_enough(mat_to_sum->grad[2], 1.0));
+    assert(close_enough(mat_to_sum->grad[3], 1.0));
+    std::cout << "tensor total sum reduction forward and backward passes verified successfully\n";
+
     std::cout << "all tests passed cleanly\n";
 
     return 0;
