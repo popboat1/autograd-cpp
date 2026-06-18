@@ -280,7 +280,16 @@ TensorPtr Tensor::sum(){
     auto self = shared_from_this();
 
     out->backward_func = [self, weak_out, rows, cols]() {
-        
+        if (auto out_ptr = weak_out.lock()){
+            double upstream_grad = out_ptr->grad[0];
+
+            for(size_t i {0}; i < rows; ++i){
+                for(size_t j {0}; j < cols; ++j){
+                    size_t self_flat = self->get_flat_index({i,j});
+                    self->grad[self_flat] += upstream_grad;
+                }
+            }
+        }
     };
 
     return out;
