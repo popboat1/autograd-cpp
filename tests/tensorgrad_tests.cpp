@@ -98,6 +98,34 @@ int main() {
     assert(close_enough(w->grad[3], 6.0));
 
     std::cout << "reverse mode automatic differentiation gradients verified successfully\n";
+
+    // test 5: checking element-wise addition forward and backward passes
+    auto mat1 = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0}, std::vector<size_t>{2, 2}, true);
+    auto mat2 = std::make_shared<Tensor>(std::vector<double>{5.0, 6.0, 7.0, 8.0}, std::vector<size_t>{2, 2}, true);
+
+    auto add_out = mat1 + mat2;
+    assert(close_enough(add_out->data[0], 6.0));
+    assert(close_enough(add_out->data[3], 12.0));
+
+    add_out->backward();
+    assert(close_enough(mat1->grad[0], 1.0));
+    assert(close_enough(mat2->grad[3], 1.0));
+    std::cout << "element-wise addition forward and backward passes verified successfully\n";
+
+
+    // test 6: checking element-wise subtraction forward and backward passes
+    auto mat3 = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0}, std::vector<size_t>{2, 2}, true);
+    auto mat4 = std::make_shared<Tensor>(std::vector<double>{5.0, 6.0, 7.0, 8.0}, std::vector<size_t>{2, 2}, true);
+
+    auto sub_out = mat3 - mat4;
+    assert(close_enough(sub_out->data[0], -4.0));
+    assert(close_enough(sub_out->data[3], -4.0));
+
+    sub_out->backward();
+    assert(close_enough(mat3->grad[0], 1.0));
+    assert(close_enough(mat4->grad[3], -1.0));
+    std::cout << "element-wise subtraction forward and backward passes verified successfully\n";
+
     std::cout << "all tests passed cleanly\n";
 
     return 0;
