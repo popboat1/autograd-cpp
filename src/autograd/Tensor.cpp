@@ -58,6 +58,95 @@ size_t Tensor::get_flat_index(const std::vector<size_t>& indices) const {
     return flat_idx;
 }
 
+// addition op
+TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
+    if(lhs->shape.size() != 2 || rhs->shape.size() != 2){
+        throw std::invalid_argument("both input must be 2d matrices");
+    }
+    if(lhs->shape != rhs->shape){
+        throw std::invalid_argument("shape must match!");
+    }
+
+    // alloc a flat memory for out data
+    size_t rows = lhs->shape[0];
+    size_t cols = lhs->shape[1];
+    std::vector<double> out_values(rows*cols, 0.0);
+
+    for(size_t i {0}; i < rows; ++i){
+        for(size_t j {0}; j < cols; ++j){
+            size_t flat_lhs = lhs->get_flat_index({i, j});
+            size_t flat_rhs = rhs->get_flat_index({i, j});
+            out_values[i * cols + j] = lhs->data[flat_lhs] + rhs->data[flat_rhs];
+        }
+    }
+
+    auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::set<TensorPtr>{lhs, rhs}, "+");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    out->backward_func = [lhs, rhs, weak_out, rows, cols]() {
+        if(auto out_ptr = weak_out.lock()) {
+            for(size_t i {0}; i < rows; ++i){
+                for(size_t j {0}; j < cols; ++j){
+                    size_t flat_lhs = lhs->get_flat_index({i, j});
+                    size_t flat_rhs = rhs->get_flat_index({i, j});
+                    auto upstream_grad = out_ptr->grad[i * cols + j];
+
+                    lhs->grad[flat_lhs] += upstream_grad;
+                    rhs->grad[flat_rhs] += upstream_grad;
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+// substraction op
+TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
+    if(lhs->shape.size() != 2 || rhs->shape.size() != 2){
+        throw std::invalid_argument("both input must be 2d matrices");
+    }
+
+    if(lhs->shape != rhs->shape){
+        throw std::invalid_argument("shape must match!");
+    }
+
+    // alloc flat memory for out data
+    size_t rows = lhs->shape[0];
+    size_t cols = lhs->shape[1];
+    std::vector<double> out_values(rows*cols, 0.0);
+
+    for(size_t i {0}; i < rows; ++i){
+        for(size_t j {0}; j < cols; ++j){
+            size_t flat_lhs = lhs->get_flat_index({i, j});
+            size_t flat_rhs = rhs->get_flat_index({i,j});
+            out_values[i * cols + j] = lhs->data[flat_lhs] - rhs->data[flat_rhs];
+        }
+    }
+
+    auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::set<TensorPtr>{lhs,rhs}, "-");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    out->backward_func = [lhs, rhs, weak_out, rows, cols]() {
+        if(auto out_ptr = weak_out.lock()){
+            for(size_t i {0}; i < rows; ++i){
+                for(size_t j {0}; j < cols; ++j){
+                    size_t flat_lhs = lhs->get_flat_index({i, j});
+                    size_t flat_rhs = rhs->get_flat_index({i, j});
+                    auto upstream_grad = out_ptr->grad[i * cols + j];
+
+                    lhs->grad[flat_lhs] += upstream_grad;
+                    rhs->grad[flat_rhs] -= upstream_grad;
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
 // matmul op
 // TODO: implement batched matmul to support N-dimensional tensors
 TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
@@ -198,3 +287,8 @@ void Tensor::backward() {
         }
     }
 }
+
+// add print function later
+// void Tensor::print() const {
+//     std::cout <<
+// }

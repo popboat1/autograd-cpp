@@ -35,6 +35,8 @@ public:
 
     // operations
     static TensorPtr matmul(const TensorPtr& lhs, const TensorPtr& rhs);
+    friend TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs);
+    friend TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs);
     TensorPtr transpose();
     TensorPtr sum();
 };
