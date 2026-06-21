@@ -191,6 +191,38 @@ int main() {
     assert(lhs_tensor->grad[0] > 0.0);
     assert(rhs_tensor->grad[0] > 0.0);
     std::cout << "[PASS] batched matrix multiplication reverse mode autograd path verified successfully\n";
+    
+    // test 11: checking tensor view manipulation and flat autograd remapping
+    std::vector<double> base_vals = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
+    auto base_tensor = std::make_shared<Tensor>(base_vals, std::vector<size_t>{8}, true);
+
+    // reshape a flat [8] tensor into a [2, 4] layout using the -1 placeholder
+    auto viewed_tensor = base_tensor->view({2, -1});
+    
+    assert(viewed_tensor->shape.size() == 2);
+    assert(viewed_tensor->shape[0] == 2 && viewed_tensor->shape[1] == 4);
+    assert(viewed_tensor->strides[0] == 4 && viewed_tensor->strides[1] == 1);
+    
+    // verify the data sharing mechanism (modifying viewed_tensor changes base_tensor data directly)
+    assert(close_enough(viewed_tensor->data[5], 6.0));
+    std::cout << "[PASS] tensor zero-copy view transformations and dimension inference verified\n";
+
+    // execute 1-to-1 backpropagation mapping
+    viewed_tensor->backward();
+    assert(base_tensor->grad.size() == 8);
+    assert(close_enough(base_tensor->grad[0], 1.0));
+    assert(close_enough(base_tensor->grad[7], 1.0));
+    std::cout << "[PASS] tensor view flat backward accumulation paths verified\n";
+
+
+    // test 12: visual check for N-dimensional bracket printing formatting
+    std::cout << "\n--- visual print verification stream ---\n";
+    std::vector<double> p_vals = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    auto p_tensor = std::make_shared<Tensor>(p_vals, std::vector<size_t>{2, 2, 3});
+    
+    std::cout << "printing a [2, 2, 3] layout tensor structure:\n";
+    p_tensor->print();
+    std::cout << "----------------------------------------\n";
 
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;

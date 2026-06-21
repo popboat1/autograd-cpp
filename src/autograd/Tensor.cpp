@@ -605,13 +605,13 @@ TensorPtr Tensor::view(const std::vector<int>& target_shape){
     // calculate contigous row-major strides for the newly resolved shape layout
     std::vector<size_t> new_strides(resolved_shape.size(), 1);
     if (!resolved_shape.empty()){
-        for(int i {static_cast<int>(resolved_shape.size()) - 2}; i >= 0; ++i){
+        for(int i {static_cast<int>(resolved_shape.size()) - 2}; i >= 0; --i){
             new_strides[i] = new_strides[i + 1] * resolved_shape[i + 1];
         }
     }
 
     // construct and return the view tracking node sharing the original flat data block
-    auto out = std::make_shared<Tensor>(this->data, resolved_shape, this->prev, "view");
+    auto out = std::make_shared<Tensor>(this->data, resolved_shape, std::set<TensorPtr>{shared_from_this()}, "view");
     out->strides = new_strides;
 
     // view is a 1-to-1 flat layout remap; backprop maps directly matching index for index
