@@ -58,6 +58,70 @@ size_t Tensor::get_flat_index(const std::vector<size_t>& indices) const {
     return flat_idx;
 }
 
+// computes broadcasted shapes
+void Tensor::compute_broadcast_metadata(
+    const TensorPtr& lhs, const TensorPtr& rhs,
+    std::vector<size_t>& out_shape,
+    std::vector<size_t>& lhs_b_strides,
+    std::vector<size_t>& rhs_b_strides
+){
+    size_t out_ndim = std::max(lhs->shape.size(), rhs->shape.size());
+
+    out_shape.resize(out_ndim);
+    lhs_b_strides.resize(out_ndim);
+    rhs_b_strides.resize(out_ndim);
+
+    for(size_t i {0}; i < out_ndim; ++i){
+        size_t out_idx = out_ndim - 1 - i;
+
+        // extract size and strides for lhs
+        size_t dim_lhs = 1;
+        size_t stride_lhs = 0;
+        if (i < lhs->shape.size()){
+            dim_lhs = lhs->shape[lhs->shape.size() - 1 - i];
+            stride_lhs = lhs->strides[lhs->shape.size() - 1 - i];
+        }
+
+        // extract size and strides for rhs
+        size_t dim_rhs = 1;
+        size_t stride_rhs = 0;
+        if(i < rhs->shape.size()){
+            dim_rhs = rhs->shape[rhs->shape.size() - 1 - i];
+            stride_rhs = rhs->strides[rhs->shape.size() - 1 - i];
+        }
+
+        // broadcasting rule comparison matrix
+        if (dim_lhs == dim_rhs){
+            out_shape[out_idx] = dim_lhs;
+            lhs_b_strides[out_idx] = stride_lhs;
+            rhs_b_strides[out_idx] = stride_rhs;
+        } else if (dim_lhs == 1) {
+            out_shape[out_idx] = dim_rhs;
+            lhs_b_strides[out_idx] = 0; // zero-stride stretch trick
+            rhs_b_strides[out_idx] = stride_rhs;
+        } else if (dim_rhs == 1) {
+            out_shape[out_idx] = dim_lhs;
+            lhs_b_strides[out_idx] = stride_lhs;
+            rhs_b_strides[out_idx] = 0; // zero-stride stretch trick
+        } else {
+            throw std::invalid_argument("tensor shapes are non-broadcastable");
+        }
+    }
+}
+
+size_t Tensor::get_flat_index_from_broadcast(
+    const std::vector<size_t>& current_coords,
+    const std::vector<size_t>& broadcast_strides
+){
+    // computes the dot product between current multi-dimensional loop
+    // coordinates and specialized broadcast stride vector
+    size_t flat_idx = 0;
+    for(size_t i {0}; i < current_coords.size(); ++i){
+        flat_idx += current_coords[i] * broadcast_strides[i];
+    }
+    return flat_idx;
+}
+
 // addition op
 TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
     if(lhs->shape.size() != 2 || rhs->shape.size() != 2){

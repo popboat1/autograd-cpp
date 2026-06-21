@@ -11,6 +11,21 @@ class Tensor;
 using TensorPtr = std::shared_ptr<Tensor>;
 
 class Tensor : public std::enable_shared_from_this<Tensor> {
+private:
+    // computes broadcasted shapes and sets strides to 0 along stretched dimensions
+    static void compute_broadcast_metadata(
+        const TensorPtr& lhs, const TensorPtr& rhs,
+        std::vector<size_t>& out_shape,
+        std::vector<size_t>& lhs_b_strides,
+        std::vector<size_t>& rhs_b_strides
+    );
+
+    // maps and N-dimensional odometer coordinate directly to a flat memory address using broadcast strides
+    static size_t get_flat_index_from_broadcast(
+        const std::vector<size_t>& current_coords,
+        const std::vector<size_t>& broadcast_strides
+    );
+
 public:
     // properties
     std::vector<double> data;
