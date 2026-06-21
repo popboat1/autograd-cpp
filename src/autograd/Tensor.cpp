@@ -566,7 +566,117 @@ void Tensor::backward() {
     }
 }
 
-// add print function later
-// void Tensor::print() const {
-//     std::cout <<
-// }
+// tensor.view() function
+TensorPtr Tensor::view(const std::vector<int>& target_shape){
+    size_t total_elements = this->data.size();
+    size_t product_of_other_dims = 1;
+    int negative_one_idx = -1;
+
+    // compute product of explicit dimensions and track the -1 placeholder
+    for (size_t i = 0; i < target_shape.size(); ++i){
+        if(target_shape[i] == -1){
+            if(negative_one_idx != -1){
+                throw std::invalid_argument("view shape can only contain single a -1 placeholder axis");
+            }
+            negative_one_idx = static_cast<int>(i);
+        } else if(target_shape[i] <= 0){
+            throw std::invalid_argument("tensor dimensions must be positive integers");
+        } else {
+            product_of_other_dims *= target_shape[i];
+        }
+    }
+
+    // convert target_shape to a standard unsigned shape vector
+    std::vector<size_t> resolved_shape(target_shape.begin(), target_shape.end());
+
+    // infer the -1 dimension size if it was provided
+    if(negative_one_idx != -1){
+        if(total_elements % product_of_other_dims != 0){
+            throw std::invalid_argument("total element capacity mismatch for requested shape layout");
+        }
+        resolved_shape[negative_one_idx] = total_elements / product_of_other_dims;
+    } else {
+        // guard if no -1 is provided
+        if(product_of_other_dims != total_elements){
+            throw std::invalid_argument("requested shape does not match total elements");
+        }
+    }
+
+    // calculate contigous row-major strides for the newly resolved shape layout
+    std::vector<size_t> new_strides(resolved_shape.size(), 1);
+    if (!resolved_shape.empty()){
+        for(int i {static_cast<int>(resolved_shape.size()) - 2}; i >= 0; ++i){
+            new_strides[i] = new_strides[i + 1] * resolved_shape[i + 1];
+        }
+    }
+
+    // construct and return the view tracking node sharing the original flat data block
+    auto out = std::make_shared<Tensor>(this->data, resolved_shape, this->prev, "view");
+    out->strides = new_strides;
+
+    // view is a 1-to-1 flat layout remap; backprop maps directly matching index for index
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    out->backward_func = [self, weak_out, total_elements]() {
+        if (auto out_ptr = weak_out.lock()) {
+            for (size_t i = 0; i < total_elements; ++i) {
+                self->grad[i] += out_ptr->grad[i];
+            }
+        }
+    };
+
+    return out;
+}
+
+// print function
+void Tensor::print() const {
+    if (this->data.empty()) {
+        std::cout << "[]\n";
+        return;
+    }
+
+    size_t total_elements = this->data.size();
+    size_t ndim = this->shape.size();
+    std::vector<size_t> current_idx(ndim, 0);
+
+    // print initial outermost structural open brackets
+    for (size_t d = 0; d < ndim; ++d) std::cout << "[";
+
+    for (size_t i = 0; i < total_elements; ++i) {
+        // retrieve and format the actual scalar element value
+        size_t flat_idx = this->get_flat_index(current_idx);
+        std::cout << this->data[flat_idx];
+
+        // track how many dimensions hit their limit simultaneously on this step
+        size_t close_brackets_count = 0;
+        for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+            if (current_idx[d] == this->shape[d] - 1) {
+                close_brackets_count++;
+            } else {
+                break;
+            }
+        }
+
+        // advance odometer coordinate map
+        bool has_more = Tensor::advance_coordinates(current_idx, this->shape);
+
+        if (has_more) {
+            if (close_brackets_count > 0) {
+                // we closed an inner dimension row block; wrap with brackets and separate lines
+                for (size_t b = 0; b < close_brackets_count; ++b) std::cout << "]";
+                std::cout << ",\n";
+                
+                // pad the next lines with opening alignment spaces matching closed depth
+                for (size_t s = 0; s < ndim - close_brackets_count; ++s) std::cout << " ";
+                for (size_t b = 0; b < close_brackets_count; ++b) std::cout << "[";
+            } else {
+                // simple element separation within the same innermost line row
+                std::cout << ", ";
+            }
+        } else {
+            // very last item execution step; cap off remaining outermost bracket limits
+            for (size_t b = 0; b < ndim; ++b) std::cout << "]";
+            std::cout << "\n";
+        }
+    }
+}

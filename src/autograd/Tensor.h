@@ -61,6 +61,12 @@ public:
     friend TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs);
     TensorPtr transpose(size_t dim0, size_t dim1);
     TensorPtr sum();
+
+    // reshapes tensor view without memory copies; accepts a single -1 placeholder axis
+    TensorPtr view(const std::vector<int>& target_shape);
+
+    // prints metadata footprint and formatted multi-dimensional bracket layouts
+    void print() const;
 };
 
 #endif
