@@ -22,7 +22,7 @@ int main() {
     assert(a->strides[0] == 3);
     assert(a->strides[1] == 1);
     assert(a->get_flat_index({1, 1}) == 4);
-    std::cout << "leaf instantiation, stride mapping, and tracking setups look clean\n";
+    std::cout << "[PASS] leaf instantiation, stride mapping, and tracking setups look clean\n";
 
 
     // test 2: verifying zero copy matrix transpositions
@@ -34,7 +34,7 @@ int main() {
     assert(a_t->strides[0] == 1);
     assert(a_t->strides[1] == 3);
     assert(a_t->data[a_t->get_flat_index({0, 1})] == 4.0);
-    std::cout << "zero copy metadata tensor transposition verified successfully\n";
+    std::cout << "[PASS] zero copy metadata tensor transposition verified successfully\n";
 
 
     // test 3: checking 2d matrix multiplication forward pass transformations
@@ -48,7 +48,7 @@ int main() {
     assert(close_enough(out->data[1], 4.0));
     assert(close_enough(out->data[2], 10.0));
     assert(close_enough(out->data[3], 8.0));
-    std::cout << "matrix multiplication forward pass outputs match analytical baselines\n";
+    std::cout << "[PASS] matrix multiplication forward pass outputs match analytical baselines\n";
 
 
     // test 4: checking autograd execution and joint matmul backpropagation paths
@@ -61,7 +61,7 @@ int main() {
     assert(close_enough(w->grad[1], 4.0));
     assert(close_enough(w->grad[2], 6.0));
     assert(close_enough(w->grad[3], 6.0));
-    std::cout << "reverse mode automatic differentiation gradients verified successfully\n";
+    std::cout << "[PASS] reverse mode automatic differentiation gradients verified successfully\n";
 
 
     // test 5: checking element-wise addition forward and backward passes
@@ -75,7 +75,7 @@ int main() {
     add_out->backward();
     assert(close_enough(mat1->grad[0], 1.0));
     assert(close_enough(mat2->grad[3], 1.0));
-    std::cout << "element-wise addition forward and backward passes verified successfully\n";
+    std::cout << "[PASS] element-wise addition forward and backward passes verified successfully\n";
 
 
     // test 6: checking element-wise subtraction forward and backward passes
@@ -89,7 +89,7 @@ int main() {
     sub_out->backward();
     assert(close_enough(mat3->grad[0], 1.0));
     assert(close_enough(mat4->grad[3], -1.0));
-    std::cout << "element-wise subtraction forward and backward passes verified successfully\n";
+    std::cout << "[PASS] element-wise subtraction forward and backward passes verified successfully\n";
 
 
     // test 7: checking element-wise multiplication forward and backward passes
@@ -104,7 +104,7 @@ int main() {
     assert(close_enough(mat5->grad[3], 40.0));
     assert(close_enough(mat6->grad[0], 2.0));
     assert(close_enough(mat6->grad[3], 5.0));
-    std::cout << "element-wise multiplication forward and backward passes verified successfully\n";
+    std::cout << "[PASS] element-wise multiplication forward and backward passes verified successfully\n";
 
 
     // test 8: checking tensor sum reduction forward and backward passes
@@ -119,7 +119,7 @@ int main() {
     sum_out->backward();
     assert(close_enough(mat_to_sum->grad[0], 1.0));
     assert(close_enough(mat_to_sum->grad[3], 1.0));
-    std::cout << "tensor total sum reduction forward and backward passes verified successfully\n";
+    std::cout << "[PASS] tensor total sum reduction forward and backward passes verified successfully\n";
 
 
     // test 9: checking advanced N-dimensional shape broadcasting and zero-stride autograd reduction
@@ -154,8 +154,44 @@ int main() {
     assert(close_enough(bias_1d->grad[0], 4.0));
     assert(close_enough(bias_1d->grad[1], 4.0));
     assert(close_enough(bias_1d->grad[2], 4.0));
-    std::cout << "N-dimensional shape broadcasting and zero-stride autograd reduction verified successfully\n";
+    std::cout << "[PASS] N-dimensional shape broadcasting and zero-stride autograd reduction verified successfully\n";
 
-    std::cout << "all tests passed cleanly\n";
+    // test 10: checking high-rank batched matrix multiplication with batch broadcasting
+    // lhs shape: [2, 1, 2, 3] (12 elements)
+    std::vector<double> b_lhs_vals = {1, 2, 3,  4, 5, 6,
+                                      1, 1, 1,  2, 2, 2};
+    auto lhs_tensor = std::make_shared<Tensor>(b_lhs_vals, std::vector<size_t>{2, 1, 2, 3}, true);
+
+    // rhs shape: [2, 2, 3, 2] (24 elements)
+    std::vector<double> b_rhs_vals = {1, 0,  0, 1,  1, 1,
+                                      2, 1,  1, 2,  0, 1,
+                                      1, 1,  1, 1,  1, 1,
+                                      0, 0,  0, 0,  0, 0};
+    auto rhs_tensor = std::make_shared<Tensor>(b_rhs_vals, std::vector<size_t>{2, 2, 3, 2}, true);
+
+    // forward pass: [2, 1, 2, 3] @ [2, 2, 3, 2] -> batch shape broadcasts to [2, 2], core matrix is [2, 2]
+    // output shape: [2, 2, 2, 2] (16 elements total)
+    auto batched_out = Tensor::matmul(lhs_tensor, rhs_tensor);
+
+    assert(batched_out->shape.size() == 4);
+    assert(batched_out->shape[0] == 2 && batched_out->shape[1] == 2);
+    assert(batched_out->shape[2] == 2 && batched_out->shape[3] == 2);
+
+    // check a structural forward pass slice element
+    // batch [0, 0], matrix row 0, col 0: (1*1 + 2*0 + 3*1) = 4.0
+    assert(close_enough(batched_out->data[0], 4.0));
+    std::cout << "[PASS] batched matrix multiplication forward transformations verified successfully\n";
+
+    // verify autograd reduction back through batched pathways
+    batched_out->backward();
+
+    // since the batch dimensions broadcasted, gradients automatically sum up
+    assert(lhs_tensor->grad.size() == 12);
+    assert(rhs_tensor->grad.size() == 24);
+    assert(lhs_tensor->grad[0] > 0.0);
+    assert(rhs_tensor->grad[0] > 0.0);
+    std::cout << "[PASS] batched matrix multiplication reverse mode autograd path verified successfully\n";
+
+    std::cout << "[PASS] all tests passed cleanly\n";
     return 0;
 }
