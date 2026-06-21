@@ -26,6 +26,12 @@ private:
         const std::vector<size_t>& broadcast_strides
     );
 
+    // advances an N-dimensional coordinate vector right-to-left; returns false when fully complete
+    static bool advance_coordinates(
+        std::vector<size_t>& coords, 
+        const std::vector<size_t>& target_shape
+    );
+
 public:
     // properties
     std::vector<double> data;
@@ -53,7 +59,7 @@ public:
     friend TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs);
     friend TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs);
     friend TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs);
-    TensorPtr transpose();
+    TensorPtr transpose(size_t dim0, size_t dim1);
     TensorPtr sum();
 };
 

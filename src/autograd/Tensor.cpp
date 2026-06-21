@@ -122,43 +122,73 @@ size_t Tensor::get_flat_index_from_broadcast(
     return flat_idx;
 }
 
+bool Tensor::advance_coordinates(
+    std::vector<size_t>& coords,
+    const std::vector<size_t>& target_shape
+){
+    if(coords.empty()) return false;
+
+    // scan right-to-left from the innermost dimension
+    for(int d {static_cast<int>(target_shape.size()) - 1}; d >= 0; --d){
+        coords[d]++;
+        if(coords[d] < target_shape[d]){
+            return true; // increment suceeded without rolling over the edge
+        }
+        coords[d] = 0; // rollover this axis and carry the addition to the left
+    }
+    return false; // the entire tensor space has been fully traversed
+}
+
 // addition op
 TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
-    if(lhs->shape.size() != 2 || rhs->shape.size() != 2){
-        throw std::invalid_argument("both input must be 2d matrices");
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+
+    // calculate broadcast shapes and zero-strides properties
+    Tensor::compute_broadcast_metadata(lhs, rhs, out_shape, lhs_b_strides, rhs_b_strides);
+
+    // calculate total elements needed for the output data array
+    size_t total_elements = 1;
+    for(size_t dim : out_shape){
+        total_elements *= dim;
     }
-    if(lhs->shape != rhs->shape){
-        throw std::invalid_argument("shape must match!");
+    std::vector<double> out_values(total_elements, 0.0);
+
+    // forward pass
+    std::vector<size_t> current_idx(out_shape.size(), 0);
+    for (size_t i = 0; i < total_elements; ++i) {
+        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
+        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+        
+        out_values[i] = lhs->data[flat_lhs] + rhs->data[flat_rhs];
+        
+        // advance the coordinate system to the next spatial block
+        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
-    // alloc a flat memory for out data
-    size_t rows = lhs->shape[0];
-    size_t cols = lhs->shape[1];
-    std::vector<double> out_values(rows*cols, 0.0);
-
-    for(size_t i {0}; i < rows; ++i){
-        for(size_t j {0}; j < cols; ++j){
-            size_t flat_lhs = lhs->get_flat_index({i, j});
-            size_t flat_rhs = rhs->get_flat_index({i, j});
-            out_values[i * cols + j] = lhs->data[flat_lhs] + rhs->data[flat_rhs];
-        }
-    }
-
-    auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::set<TensorPtr>{lhs, rhs}, "+");
+    // construct graph node
+    auto out = std::make_shared<Tensor>(out_values, out_shape, std::set<TensorPtr>{lhs, rhs}, "+");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, rows, cols]() {
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements]() {
         if(auto out_ptr = weak_out.lock()) {
-            for(size_t i {0}; i < rows; ++i){
-                for(size_t j {0}; j < cols; ++j){
-                    size_t flat_lhs = lhs->get_flat_index({i, j});
-                    size_t flat_rhs = rhs->get_flat_index({i, j});
-                    auto upstream_grad = out_ptr->grad[i * cols + j];
+            std::vector<size_t> back_idx(out_shape.size(), 0);
 
-                    lhs->grad[flat_lhs] += upstream_grad;
-                    rhs->grad[flat_rhs] += upstream_grad;
-                }
+            for(size_t i {0}; i < total_elements; ++i){
+                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                
+                // upstream gradient vector aligns perfectly with total_elements sequence
+                auto upstream_grad = out_ptr->grad[i];
+
+                // zero-stride values automatically combine multi-dimensional gradients here
+                lhs->grad[flat_lhs] += upstream_grad;
+                rhs->grad[flat_rhs] += upstream_grad;
+
+                // step backward coordinate tracking layout forward
+                Tensor::advance_coordinates(back_idx, out_shape);
             }
         }
     };
@@ -168,42 +198,54 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
 
 // substraction op
 TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
-    if(lhs->shape.size() != 2 || rhs->shape.size() != 2){
-        throw std::invalid_argument("both input must be 2d matrices");
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+
+    // calculate broadcast shapes and zero-strides properties
+    Tensor::compute_broadcast_metadata(lhs, rhs, out_shape, lhs_b_strides, rhs_b_strides);
+
+    // calc total elements needed for out data
+    size_t total_elements = 1;
+    for(size_t dim : out_shape){
+        total_elements *= dim;
+    }
+    std::vector<double> out_values(total_elements, 0.0);
+
+    // forward pass
+    std::vector<size_t> current_idx(out_shape.size(), 0);
+    for(size_t i {0}; i < total_elements; ++i){
+        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
+        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+
+        out_values[i] = lhs->data[flat_lhs] - rhs->data[flat_rhs];
+
+        // advance the coordinate system to the next spatial block
+        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
-    if(lhs->shape != rhs->shape){
-        throw std::invalid_argument("shape must match!");
-    }
-
-    // alloc flat memory for out data
-    size_t rows = lhs->shape[0];
-    size_t cols = lhs->shape[1];
-    std::vector<double> out_values(rows*cols, 0.0);
-
-    for(size_t i {0}; i < rows; ++i){
-        for(size_t j {0}; j < cols; ++j){
-            size_t flat_lhs = lhs->get_flat_index({i, j});
-            size_t flat_rhs = rhs->get_flat_index({i,j});
-            out_values[i * cols + j] = lhs->data[flat_lhs] - rhs->data[flat_rhs];
-        }
-    }
-
-    auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::set<TensorPtr>{lhs,rhs}, "-");
+    // construct graph node
+    auto out = std::make_shared<Tensor>(out_values, out_shape, std::set<TensorPtr>{lhs,rhs}, "-");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, rows, cols]() {
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements]() {
         if(auto out_ptr = weak_out.lock()){
-            for(size_t i {0}; i < rows; ++i){
-                for(size_t j {0}; j < cols; ++j){
-                    size_t flat_lhs = lhs->get_flat_index({i, j});
-                    size_t flat_rhs = rhs->get_flat_index({i, j});
-                    auto upstream_grad = out_ptr->grad[i * cols + j];
+            std::vector<size_t> back_idx(out_shape.size(), 0);
 
-                    lhs->grad[flat_lhs] += upstream_grad;
-                    rhs->grad[flat_rhs] -= upstream_grad;
-                }
+            for(size_t i {0}; i < total_elements; ++i){
+                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                
+                // upstream gradient vector aligns perfectly with total_elements sequence
+                auto upstream_grad = out_ptr->grad[i];
+
+                // zero-stride values automatically combine multi-dimensional gradients here
+                lhs->grad[flat_lhs] += upstream_grad;
+                rhs->grad[flat_rhs] -= upstream_grad;
+
+                // step backward coordinate tracking layout forward
+                Tensor::advance_coordinates(back_idx, out_shape);
             }
         }
     };
@@ -213,39 +255,49 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
 
 // element wise operator
 TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
-    if(lhs->shape.size() != 2 || rhs->shape.size() != 2){
-        throw std::invalid_argument("both input must be 2d matrices");
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+
+    // calculate broadcast shapes and zero-strides properties
+    Tensor::compute_broadcast_metadata(lhs, rhs, out_shape, lhs_b_strides, rhs_b_strides);
+
+    // calculate total elements needed for the output data array
+    size_t total_elements = 1;
+    for(size_t dim : out_shape){
+        total_elements *= dim;
     }
-    if(lhs->shape != rhs->shape){
-        throw std::invalid_argument("shape must match!");
+    std::vector<double> out_values(total_elements, 0.0);
+
+    // forward pass
+    std::vector<size_t> current_idx(out_shape.size(), 0);
+    for (size_t i = 0; i < total_elements; ++i) {
+        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
+        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+        
+        out_values[i] = lhs->data[flat_lhs] * rhs->data[flat_rhs];
+        
+        // advance the coordinate system to the next spatial block
+        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
-    size_t rows = lhs->shape[0];
-    size_t cols = lhs->shape[1];
-    std::vector<double> out_values(rows*cols, 0.0);
-
-    for(size_t i {0}; i < rows; ++i){
-        for(size_t j {0}; j < cols; ++j){
-            size_t flat_lhs = lhs->get_flat_index({i,j});
-            size_t flat_rhs = rhs->get_flat_index({i,j});
-            out_values[i * cols + j] = lhs->data[flat_lhs] * rhs->data[flat_rhs];
-        }
-    }
-
-    auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::set<TensorPtr>{lhs, rhs}, "*");
+    auto out = std::make_shared<Tensor>(out_values, out_shape, std::set<TensorPtr>{lhs, rhs}, "*");
 
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, rows, cols](){
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements](){
         if (auto out_ptr = weak_out.lock()){
-            for(size_t i {0}; i < rows; ++i){
-                for(size_t j {0}; j < cols; ++j){
-                    size_t flat_lhs = lhs->get_flat_index({i, j});
-                    size_t flat_rhs = rhs->get_flat_index({i, j});
-                    auto upstream_grad = out_ptr->grad[i * cols + j];
+            std::vector<size_t> back_idx(out_shape.size(), 0);
 
-                    lhs->grad[flat_lhs] += upstream_grad * rhs->data[flat_rhs];
-                    rhs->grad[flat_rhs] += upstream_grad * lhs->data[flat_lhs];
-                }
+            for(size_t i {0}; i < total_elements; ++i){
+                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                
+                auto upstream_grad = out_ptr->grad[i];
+
+                lhs->grad[flat_lhs] += upstream_grad * rhs->data[flat_rhs];
+                rhs->grad[flat_rhs] += upstream_grad * lhs->data[flat_lhs];
+
+                Tensor::advance_coordinates(back_idx, out_shape);
             }
         }
     };
@@ -254,7 +306,6 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
 }
 
 // matmul op
-// TODO: implement batched matmul to support N-dimensional tensors
 TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     // verify dimensions
     if (lhs->shape.size() != 2 || rhs->shape.size() != 2){
@@ -325,33 +376,25 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     return out;
 }
 
+// sum function
 TensorPtr Tensor::sum(){
-    size_t rows = this->shape[0];
-    size_t cols = this->shape[1];
-    std::vector <double> out_values(1, 0.0);
-
-    for(size_t i {0}; i < rows; ++i){
-        for(size_t j {0}; j < cols; ++j){
-            size_t this_lhs = this->get_flat_index({i,j});
-            out_values[0] += this->data[this_lhs];
-        }
+    std::vector<double> out_values(1, 0.0);
+    for (double val : this->data) {
+        out_values[0] += val;
     }
 
-    auto out = std::make_shared<Tensor>(out_values, std::vector<size_t>{1, 1}, std::set<TensorPtr>{shared_from_this()}, "sum");
+    auto out = std::make_shared<Tensor>(out_values, std::vector<size_t>{1}, std::set<TensorPtr>{shared_from_this()}, "sum");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
 
-    out->backward_func = [self, weak_out, rows, cols]() {
+    out->backward_func = [self, weak_out]() {
         if (auto out_ptr = weak_out.lock()){
             double upstream_grad = out_ptr->grad[0];
-
-            for(size_t i {0}; i < rows; ++i){
-                for(size_t j {0}; j < cols; ++j){
-                    size_t self_flat = self->get_flat_index({i,j});
-                    self->grad[self_flat] += upstream_grad;
-                }
+            // broadcast the scalar gradient to every single native data location
+            for (size_t i = 0; i < self->grad.size(); ++i) {
+                self->grad[i] += upstream_grad;
             }
         }
     };
@@ -359,15 +402,17 @@ TensorPtr Tensor::sum(){
     return out;
 }
 
-// TODO: implement backward func, transpose, sum, addition, substrac, and etc...
-TensorPtr Tensor::transpose() {
-    if(shape.size() != 2){
-        throw std::invalid_argument("transpose error");
+TensorPtr Tensor::transpose(size_t dim0, size_t dim1) {
+    if (dim0 >= shape.size() || dim1 >= shape.size()) {
+        throw std::invalid_argument("Transpose dimensions out of bounds");
     }
 
-    // create swapped shape and size configs
-    std::vector<size_t> new_shape = {shape[1], shape[0]};
-    std::vector<size_t> new_strides = {strides[1], strides[0]};
+    std::vector<size_t> new_shape = shape;
+    std::vector<size_t> new_strides = strides;
+
+    // swap metadata dimensions
+    std::swap(new_shape[dim0], new_shape[dim1]);
+    std::swap(new_strides[dim0], new_strides[dim1]);
 
     // build the new output tensor
     auto out = std::make_shared<Tensor>(data, 
@@ -380,15 +425,26 @@ TensorPtr Tensor::transpose() {
     // the derivative of a transpose is simply transposing the upstream grads back
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
-    out->backward_func = [self, weak_out](){
+    out->backward_func = [self, weak_out, dim0, dim1](){
         if(auto out_ptr = weak_out.lock()){
-            //map the output tensor gradients back to self using swapped coordinate tracking
-            for(size_t i {0}; i < out_ptr->shape[0]; ++i){
-                for(size_t j {0}; j < out_ptr->shape[1]; ++j){
-                    size_t out_flat = out_ptr->get_flat_index({i, j});
-                    size_t self_flat = self->get_flat_index({j, i});
-                    self->grad[self_flat] += out_ptr->grad[out_flat];
-                }
+            size_t total_elements = out_ptr->data.size();
+            std::vector<size_t> back_idx(out_ptr->shape.size(), 0);
+
+            for(size_t i {0}; i < total_elements; ++i){
+                // out_flat is perfectly contiguous tracking the odometer step
+                size_t out_flat = i;
+
+                // mirror coordinates to look up parent offset
+                std::vector<size_t> self_idx = back_idx;
+                std::swap(self_idx[dim0], self_idx[dim1]);
+
+                size_t self_flat = self->get_flat_index(self_idx);
+
+                // accum grads back to parent
+                self->grad[self_flat] += out_ptr->grad[out_flat];
+
+                // step odometer forward
+                Tensor::advance_coordinates(back_idx, out_ptr->shape);
             }
         }
     };
