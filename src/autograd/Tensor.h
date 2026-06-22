@@ -59,6 +59,7 @@ public:
     friend TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs);
     friend TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs);
     friend TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs);
+    friend TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs);
     TensorPtr transpose(size_t dim0, size_t dim1);
     TensorPtr sum();
 

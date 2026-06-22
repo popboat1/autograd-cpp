@@ -305,6 +305,64 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
     return out;
 }
 
+// division op
+TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+
+    // calculate broadcast shapes and zero-strides properties
+    Tensor::compute_broadcast_metadata(lhs, rhs, out_shape, lhs_b_strides, rhs_b_strides);
+
+    // calculate total elements needed for the output data array
+    size_t total_elements = 1;
+    for (size_t dim : out_shape) {
+        total_elements *= dim;
+    }
+    std::vector<double> out_values(total_elements, 0.0);
+
+    // forward pass
+    std::vector<size_t> current_idx(out_shape.size(), 0);
+    for (size_t i = 0; i < total_elements; ++i) {
+        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
+        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+        
+        // standard element-wise division
+        out_values[i] = lhs->data[flat_lhs] / rhs->data[flat_rhs];
+        
+        Tensor::advance_coordinates(current_idx, out_shape);
+    }
+
+    auto out = std::make_shared<Tensor>(out_values, out_shape, std::set<TensorPtr>{lhs, rhs}, "/");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements]() {
+        if (auto out_ptr = weak_out.lock()) {
+            std::vector<size_t> back_idx(out_shape.size(), 0);
+
+            for (size_t i = 0; i < total_elements; ++i) {
+                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                
+                auto upstream_grad = out_ptr->grad[i];
+                double lhs_val = lhs->data[flat_lhs];
+                double rhs_val = rhs->data[flat_rhs];
+
+                // d(x/y) / dx = 1 / y
+                lhs->grad[flat_lhs] += upstream_grad / rhs_val;
+                
+                // d(x/y) / dy = -x / y^2
+                rhs->grad[flat_rhs] -= upstream_grad * (lhs_val / (rhs_val * rhs_val));
+
+                Tensor::advance_coordinates(back_idx, out_shape);
+            }
+        }
+    };
+
+    return out;
+}
+
 // matmul op
 TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     // verify dimensions
@@ -586,6 +644,115 @@ TensorPtr Tensor::exp(){
     return out;
 }
 
+//tanh function
+TensorPtr Tensor::tanh(){
+    std::vector<double> out_vals (data.size());
+
+    // forward pass
+    for(size_t i {0}; i < data.size(); ++i){
+        out_vals[i] = std::tanh(data[i]);
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::set<TensorPtr>{shared_from_this()}, "tanh");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    out->backward_func = [self, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            for(size_t i {0}; i < self->data.size(); ++i){
+                double t = out_ptr->data[i];
+                // d/dx tanh(x) is 1 - tanh^2(x)
+                self->grad[i] += out_ptr->grad[i] * (1.0 - t * t);
+            }
+        }
+    };
+
+    return out;
+}
+
+
+// sigmoid function
+TensorPtr Tensor::sigmoid(){
+    std::vector<double> out_vals(data.size());
+
+    // forward pass
+    for(size_t i {0}; i < data.size(); ++i){
+        out_vals[i] = 1.0 / (1 + std::exp(-data[i]));
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::set<TensorPtr>{shared_from_this()}, "sigmoid");
+
+    //backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    out->backward_func = [self, weak_out]() {
+        if(auto out_ptr = weak_out.lock()){
+            for(size_t i {0}; i < self->data.size(); ++i){
+                // d/dx sigmoid(x) is sigmoid(x) * (1 - sigmoid(x))
+                double s = out_ptr->data[i];
+                self->grad[i] += out_ptr->grad[i] * (s * (1.0 - s));
+            }
+        }
+    };
+
+    return out;
+}
+
+// log function (natural log)
+TensorPtr Tensor::log(){
+    std::vector<double> out_vals(data.size());
+
+    // forward pass
+    for(size_t i {0}; i < data.size(); ++i){
+        out_vals[i] = std::log(data[i]);
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::set<TensorPtr>{shared_from_this()}, "log");
+
+    // backward pass
+    auto self = shared_from_this();
+    std::weak_ptr<Tensor> weak_out = out;
+    out->backward_func = [self, weak_out]() {
+        if(auto out_ptr = weak_out.lock()){
+            for(size_t i {0}; i < self->data.size(); ++i){
+                // local derivative of ln(x) is 1/x
+                self->grad[i] += out_ptr->grad[i] * (1.0 / self->data[i]);
+            }
+        }
+    };
+
+    return out;
+}
+
+// pow function
+TensorPtr Tensor::pow(double exponent){
+    std::vector<double> out_vals (data.size());
+
+    // forward pass
+    for(size_t i {0}; i < data.size(); ++i){
+        out_vals[i] = std::pow(data[i], exponent);
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::set<TensorPtr>{shared_from_this()}, "pow");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    
+    // explicitly capture the exponent by value
+    out->backward_func = [self, weak_out, exponent]() {
+        if (auto out_ptr = weak_out.lock()) {
+            for (size_t i {0}; i < self->data.size(); ++i) {
+                // local derivative of x^n is n * x^(n-1)
+                double local_derivative = exponent * std::pow(self->data[i], exponent - 1.0);
+                self->grad[i] += out_ptr->grad[i] * local_derivative;
+            }
+        }
+    };
+
+    return out;
+}
 
 // backward pass function
 void Tensor::backward() {
