@@ -534,6 +534,58 @@ TensorPtr Tensor::transpose(size_t dim0, size_t dim1) {
     return out;
 }
 
+// ReLU
+TensorPtr Tensor::relu(){
+    std::vector<double> out_vals(data.size());
+
+    // forward pass
+    for(size_t i {0}; i < data.size(); ++i){
+        out_vals[i] = data[i] > 0.0 ? data[i] : 0.0;
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::set<TensorPtr>{shared_from_this()}, "relu");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    out->backward_func = [self, weak_out](){
+        if(auto out_ptr = weak_out.lock()){
+            for(size_t i {0}; i < self->data.size(); ++i){
+                // local derivative is 1 if x > 0 else 0
+                double local_derivative = self->data[i] > 0.0 ? 1.0 : 0.0;
+                self->grad[i] += out_ptr->grad[i] * local_derivative;
+            }
+        }
+    };
+
+    return out;
+}
+
+// exp function
+TensorPtr Tensor::exp(){
+    std::vector<double> out_vals(data.size());
+
+    // forward pass
+    for(size_t i {0}; i < data.size(); ++i){
+        out_vals[i] = std::exp(data[i]);
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::set<TensorPtr>{shared_from_this()}, "exp");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    out->backward_func = [self, weak_out]() {
+        if(auto out_ptr = weak_out.lock()){
+            for(size_t i {0}; i < self->data.size(); ++i){
+                self->grad[i] += out_ptr->grad[i] * out_ptr->data[i];
+            }
+        }
+    };
+
+    return out;
+}
+
 
 // backward pass function
 void Tensor::backward() {

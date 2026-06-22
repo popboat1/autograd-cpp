@@ -62,6 +62,14 @@ public:
     TensorPtr transpose(size_t dim0, size_t dim1);
     TensorPtr sum();
 
+    // more element wise math ops & activation fns
+    TensorPtr relu();
+    TensorPtr exp();
+    TensorPtr tanh();
+    TensorPtr sigmoid();
+    TensorPtr log();
+    TensorPtr pow(double exponent);
+
     // reshapes tensor view without memory copies; accepts a single -1 placeholder axis
     TensorPtr view(const std::vector<int>& target_shape);
 
