@@ -846,6 +846,7 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
     return out;
 }
 
+// tensor->max() function
 TensorPtr Tensor::max(size_t dim, bool keepdim){
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
 
@@ -892,6 +893,126 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
         }
     };
 
+    return out;
+}
+
+// tensor->min() function
+TensorPtr Tensor::min(size_t dim, bool keepdim){
+    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
+
+    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+    auto min_indices = std::make_shared<std::vector<size_t>>(meta.total_out_elements, 0); // required for backward pass
+
+    // forward pass
+    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+            size_t out_flat = outer * meta.inner_block_size + inner;
+
+            double current_min = INFINITY;
+            size_t best_flat_idx = 0;
+
+            for(size_t r {0}; r < meta.reduced_size; ++r){
+                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+
+                if (data[self_flat] < current_min) {
+                    current_min = data[self_flat];
+                    best_flat_idx = self_flat;
+                }
+            }
+
+            out_vals[out_flat] = current_min;
+            (*min_indices)[out_flat] = best_flat_idx;
+        }
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::set<TensorPtr>{shared_from_this()}, "min");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    size_t total_out_elements = meta.total_out_elements;
+
+    out->backward_func = [self, weak_out, min_indices, total_out_elements]() {
+        if(auto out_ptr = weak_out.lock()){
+            // gradient routing bypasses block math entirely; just map flat index to flat index
+            for (size_t i {0}; i < total_out_elements; ++i) {
+                size_t winner_flat_idx = (*min_indices)[i];
+                self->grad[winner_flat_idx] += out_ptr->grad[i];
+            }
+        }
+    };
+
+    return out;
+}
+
+// tensor->argmax() function
+TensorPtr Tensor::argmax(size_t dim, bool keepdim) {
+    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
+
+    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+    // forward pass
+    for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
+        for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
+            size_t out_flat = outer * meta.inner_block_size + inner;
+
+            double current_max = -INFINITY;
+            size_t best_r = 0; // Track the relative index 'r'
+
+            for (size_t r {0}; r < meta.reduced_size; ++r) {
+                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+
+                if (data[self_flat] > current_max) {
+                    current_max = data[self_flat];
+                    best_r = r;
+                }
+            }
+
+            // Output the index (cast to double), not the value
+            out_vals[out_flat] = static_cast<double>(best_r);
+        }
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::set<TensorPtr>{}, "argmax");
+    
+    out->requires_grad = false;
+    
+    return out;
+}
+
+// tensor->argmin() function
+TensorPtr Tensor::argmin(size_t dim, bool keepdim) {
+    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
+
+    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+    // forward pass
+    for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
+        for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
+            size_t out_flat = outer * meta.inner_block_size + inner;
+
+            double current_min = INFINITY;
+            size_t best_r = 0; // Track the relative index 'r'
+
+            for (size_t r {0}; r < meta.reduced_size; ++r) {
+                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+
+                if (data[self_flat] < current_min) {
+                    current_min = data[self_flat];
+                    best_r = r;
+                }
+            }
+
+            // Output the index (cast to double), not the value
+            out_vals[out_flat] = static_cast<double>(best_r);
+        }
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::set<TensorPtr>{}, "argmin");
+    
+    out->requires_grad = false;
+    
     return out;
 }
 
