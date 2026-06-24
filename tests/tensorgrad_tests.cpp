@@ -224,6 +224,64 @@ int main() {
     p_tensor->print();
     std::cout << "----------------------------------------\n";
 
+    // test 13: checking element-wise division and advanced math/activations
+    auto d_num = std::make_shared<Tensor>(std::vector<double>{2.0, -4.0, 1.0}, std::vector<size_t>{3}, true);
+    auto d_den = std::make_shared<Tensor>(std::vector<double>{2.0, 2.0, 0.5}, std::vector<size_t>{3}, true);
+
+    // Test operator/
+    auto div_out = d_num / d_den;
+    assert(close_enough(div_out->data[0], 1.0));
+    assert(close_enough(div_out->data[1], -2.0));
+    assert(close_enough(div_out->data[2], 2.0));
+
+    // Test ReLU
+    auto relu_out = d_num->relu();
+    assert(close_enough(relu_out->data[0], 2.0));
+    assert(close_enough(relu_out->data[1], 0.0)); // Negative mapped to 0
+    assert(close_enough(relu_out->data[2], 1.0));
+
+    // Check ReLU backward pass
+    relu_out->backward();
+    assert(close_enough(d_num->grad[0], 1.0)); // Local grad 1.0 * upstream 1.0
+    assert(close_enough(d_num->grad[1], 0.0)); // Local grad 0.0 * upstream 1.0
+    std::cout << "[PASS] element-wise division and math activations verified successfully\n";
+
+
+    // test 14: checking dimensional reductions (mean, max, argmax) and keepdim
+    // Matrix shape: [2, 3]
+    std::vector<double> r_vals = {1.0, 2.0, 3.0,
+                                  4.0, 5.0, 6.0};
+    auto r_tensor = std::make_shared<Tensor>(r_vals, std::vector<size_t>{2, 3}, true);
+
+    // Test mean across columns (dim=0). keepdim=true ensures output is [1, 3]
+    auto mean_dim0 = r_tensor->mean(0, true); 
+    assert(mean_dim0->shape.size() == 2);
+    assert(mean_dim0->shape[0] == 1 && mean_dim0->shape[1] == 3);
+    assert(close_enough(mean_dim0->data[0], 2.5)); // (1.0 + 4.0) / 2
+    assert(close_enough(mean_dim0->data[2], 4.5)); // (3.0 + 6.0) / 2
+
+    // Test max across rows (dim=1). keepdim=false ensures output is [2]
+    auto max_dim1 = r_tensor->max(1, false);
+    assert(max_dim1->shape.size() == 1);
+    assert(max_dim1->shape[0] == 2);
+    assert(close_enough(max_dim1->data[0], 3.0)); // Max of [1, 2, 3]
+    assert(close_enough(max_dim1->data[1], 6.0)); // Max of [4, 5, 6]
+
+    // Test argmax across rows (dim=1). Output should be the indices.
+    auto argmax_dim1 = r_tensor->argmax(1, false);
+    assert(close_enough(argmax_dim1->data[0], 2.0)); // Index of 3.0 is 2
+    assert(close_enough(argmax_dim1->data[1], 2.0)); // Index of 6.0 is 2
+    assert(argmax_dim1->requires_grad == false);     // Step functions sever the graph
+
+    // Verify autograd routing for max()
+    // The gradient of 1.0 should ONLY route to the elements that "won" the max function
+    max_dim1->backward();
+    assert(close_enough(r_tensor->grad[2], 1.0)); // Flat index 2 (value 3.0) won
+    assert(close_enough(r_tensor->grad[5], 1.0)); // Flat index 5 (value 6.0) won
+    assert(close_enough(r_tensor->grad[0], 0.0)); // Flat index 0 (value 1.0) lost
+    assert(close_enough(r_tensor->grad[3], 0.0)); // Flat index 3 (value 4.0) lost
+    std::cout << "[PASS] dimensional reductions, keepdim broadcasting, and autograd routing verified\n";
+
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;
 }
