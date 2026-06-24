@@ -32,6 +32,18 @@ private:
         const std::vector<size_t>& target_shape
     );
 
+    // store calculated variables for dimensional reductions
+    struct ReductionMeta {
+        std::vector<size_t> out_shape;
+        size_t total_out_elements;
+        size_t reduced_size;
+        size_t inner_block_size;
+        size_t outer_block_size;
+    };
+
+    // helper function to calculate all the boilerplate metadata
+    ReductionMeta prepare_reduction_metadata(size_t dim, bool keepdim) const;
+
 public:
     // properties
     std::vector<double> data;
@@ -70,6 +82,13 @@ public:
     TensorPtr sigmoid();
     TensorPtr log();
     TensorPtr pow(double exponent);
+
+    // dimensional reduction ops
+    TensorPtr mean(size_t dim, bool keepdim = false);
+    TensorPtr max(size_t dim, bool keepdim = false);
+    TensorPtr min(size_t dim, bool keepdim = false);
+    TensorPtr argmax(size_t dim, bool keepdim = false);
+    TensorPtr argmin(size_t dim, bool keepdim = false);
 
     // reshapes tensor view without memory copies; accepts a single -1 placeholder axis
     TensorPtr view(const std::vector<int>& target_shape);

@@ -139,6 +139,40 @@ bool Tensor::advance_coordinates(
     return false; // the entire tensor space has been fully traversed
 }
 
+// helper function to calculate all the boilerplate metadata
+Tensor::ReductionMeta Tensor::prepare_reduction_metadata(size_t dim, bool keepdim) const {
+    if (dim >= shape.size()) throw std::invalid_argument("Dimension out of bounds");
+
+    ReductionMeta meta;
+    meta.out_shape = this->shape;
+
+    if (keepdim) {
+        meta.out_shape[dim] = 1;
+    } else {
+        meta.out_shape.erase(meta.out_shape.begin() + dim);
+    }
+
+    if (meta.out_shape.empty()) {
+        meta.out_shape = {1};
+    }
+
+    meta.total_out_elements = 1;
+    for (size_t d : meta.out_shape) {
+        meta.total_out_elements *= d;
+    }
+
+    meta.reduced_size = this->shape[dim];
+
+    meta.inner_block_size = 1;
+    for (size_t i = dim + 1; i < this->shape.size(); ++i) {
+        meta.inner_block_size *= this->shape[i];
+    }
+
+    meta.outer_block_size = meta.total_out_elements / meta.inner_block_size;
+
+    return meta;
+}
+
 // addition op
 TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
     std::vector<size_t> out_shape;
@@ -747,6 +781,113 @@ TensorPtr Tensor::pow(double exponent){
                 // local derivative of x^n is n * x^(n-1)
                 double local_derivative = exponent * std::pow(self->data[i], exponent - 1.0);
                 self->grad[i] += out_ptr->grad[i] * local_derivative;
+            }
+        }
+    };
+
+    return out;
+}
+
+// tensor->mean() function
+TensorPtr Tensor::mean(size_t dim, bool keepdim){
+    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
+    
+    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+    // forward pass
+    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+            size_t out_flat = outer * meta.inner_block_size + inner;
+            
+            double sum = 0.0;
+
+            for(size_t r {0}; r < meta.reduced_size; ++r){
+                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+
+                sum += data[self_flat];
+            }
+
+            out_vals[out_flat] = sum / meta.reduced_size;
+        }
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::set<TensorPtr>{shared_from_this()}, "mean");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+
+    size_t outer_bs = meta.outer_block_size;
+    size_t inner_bs = meta.inner_block_size;
+    size_t r_size = meta.reduced_size;
+
+    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size](){
+        if(auto out_ptr = weak_out.lock()){
+            // derivative of a mean is just 1/N
+            double grad_scale = 1.0 / static_cast<double>(r_size);
+
+            for (size_t outer {0}; outer < outer_bs; ++outer) {
+                for (size_t inner {0}; inner < inner_bs; ++inner) {
+                    size_t out_flat = outer * inner_bs + inner;
+                    
+                    // grab the upstream gradient for this specific block
+                    double upstream_grad = out_ptr->grad[out_flat] * grad_scale;
+
+                    // distribute it equally to all elements that formed the mean
+                    for (size_t r {0}; r < r_size; ++r) {
+                        size_t self_flat = outer * (r_size * inner_bs) + r * inner_bs + inner;
+                        self->grad[self_flat] += upstream_grad;
+                    }
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+TensorPtr Tensor::max(size_t dim, bool keepdim){
+    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
+
+    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+    auto max_indices = std::make_shared<std::vector<size_t>>(meta.total_out_elements, 0); // required for backward pass
+
+    // forward pass
+    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+            size_t out_flat = outer * meta.inner_block_size + inner;
+
+            double current_max = -INFINITY;
+            size_t best_flat_idx = 0;
+
+            for(size_t r {0}; r < meta.reduced_size; ++r){
+                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+
+                if (data[self_flat] > current_max) {
+                    current_max = data[self_flat];
+                    best_flat_idx = self_flat;
+                }
+            }
+
+            out_vals[out_flat] = current_max;
+            (*max_indices)[out_flat] = best_flat_idx;
+        }
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::set<TensorPtr>{shared_from_this()}, "max");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    size_t total_out_elements = meta.total_out_elements;
+
+    out->backward_func = [self, weak_out, max_indices, total_out_elements]() {
+        if(auto out_ptr = weak_out.lock()){
+            // gradient routing bypasses block math entirely; just map flat index to flat index
+            for (size_t i {0}; i < total_out_elements; ++i) {
+                size_t winner_flat_idx = (*max_indices)[i];
+                self->grad[winner_flat_idx] += out_ptr->grad[i];
             }
         }
     };
