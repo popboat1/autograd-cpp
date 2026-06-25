@@ -5,7 +5,7 @@
 MLP::MLP(int fan_in, std::vector<int> hidden_sizes, std::string activation_layer, int seed){
     this->activation_layer = activation_layer;
     int current_in = fan_in;
-    int seed_modifier = {0}; // to break symmetry between layers
+    int seed_modifier = 0; // to break symmetry between layers
 
     for(int& hidden_size : hidden_sizes){
         layers.emplace_back(current_in, hidden_size, seed + seed_modifier);
@@ -14,33 +14,28 @@ MLP::MLP(int fan_in, std::vector<int> hidden_sizes, std::string activation_layer
     }
 }
 
-std::vector<ValuePtr> MLP::forward(const std::vector<ValuePtr>& xin){
-    std::vector<ValuePtr> current_signals = xin;
+TensorPtr MLP::forward(const TensorPtr& xin) {
+    TensorPtr current_signal = xin;
 
     for(size_t i {0}; i < layers.size(); ++i){
-        auto out = layers[i].forward(current_signals);
+        current_signal = layers[i].forward(current_signal);
 
         if(i < layers.size() - 1){
-            for(auto& val : out){
-                if(activation_layer == "relu"){
-                    val = val->relu();
-                }else if(activation_layer == "tanh"){
-                    val = val->tanh();
-                }
+            if(activation_layer == "relu"){
+                current_signal = current_signal->relu();
+            } else if(activation_layer == "tanh"){
+                current_signal = current_signal->tanh();
             }
         }
-        current_signals = out;
     }
-    return current_signals;
+    return current_signal;
 }
 
-std::vector<ValuePtr> MLP::parameters() const {
-    std::vector<ValuePtr> total_params;
-
+std::vector<TensorPtr> MLP::parameters() const {
+    std::vector<TensorPtr> total_params;
     for(const auto& layer : layers){
         auto layer_params = layer.parameters();
         total_params.insert(total_params.end(), layer_params.begin(), layer_params.end());
     }
-
     return total_params;
 }

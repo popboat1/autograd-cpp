@@ -8,16 +8,16 @@ public:
     Linear(int fan_in, int fan_out, int seed=42); // init weights and biases randomly based on in/out size
 
     // forward pass
-    std::vector<ValuePtr> forward(const std::vector<ValuePtr>& xin);
+    TensorPtr forward(const TensorPtr& xin);
     
     // collects all weight and bias scalar pointers into a flat list
-    std::vector<ValuePtr> parameters() const override;
+    std::vector<TensorPtr> parameters() const override;
 
 private:
     int fan_in;
     int fan_out;
-    std::vector<std::vector<ValuePtr>> weights; // [fan_in][fan_out]
-    std::vector<ValuePtr> biases; // [fanout]
+    TensorPtr weights; // [fan_in][fan_out]
+    TensorPtr biases; // [fanout]
 };
 
 #endif

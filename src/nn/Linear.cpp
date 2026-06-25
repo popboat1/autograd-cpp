@@ -7,47 +7,21 @@ Linear::Linear(int fan_in, int fan_out, int seed) : fan_in(fan_in), fan_out(fan_
     std::uniform_real_distribution<double> dis(-1.0, 0.1);
 
     // initialize weights matrix
-    weights.resize(fan_out);
-    for(int i {0}; i < fan_out; ++i){
-        weights[i].resize(fan_in);
-        for(int j {0}; j < fan_in; ++j){
-            weights[i][j] = make_val(dis(gen));
-        }
-    }
+    std::vector<double> w_vals(fan_in * fan_out);
+    for (double& val : w_vals) val = dis(gen);
+    weights = std::make_shared<Tensor>(w_vals, std::vector<size_t>{(size_t)fan_in, (size_t)fan_out}, true);
 
     // initialize bias
-    biases.resize(fan_out);
-    for(int i {0}; i < fan_out; ++i){
-        biases[i] = make_val(dis(gen));
-    }
+    std::vector<double> b_vals(fan_out);
+    for (double& val : b_vals) val = dis(gen);
+    biases = std::make_shared<Tensor>(b_vals, std::vector<size_t>{(size_t)fan_out}, true);
 }
 
-std::vector<ValuePtr> Linear::forward(const std::vector<ValuePtr>& xin){
-    std::vector<ValuePtr> out(fan_out);
-
+TensorPtr Linear::forward(const TensorPtr& xin) {
     // compute scalar dot product for each neuron
-    for (int i {0}; i < fan_out; ++i){
-        ValuePtr sum = make_val(0.0);
-        for(int j {0}; j < fan_in; ++j){
-            sum = sum + (weights[i][j] * xin[j]);
-        }
-        out[i] = sum + biases[i];
-    }
-
-    return out;
+    return Tensor::matmul(xin, weights) + biases;
 }
 
-std::vector<ValuePtr> Linear::parameters() const {
-    std::vector<ValuePtr> params;
-    
-    for (const auto& row : weights) {
-        for (const auto& w : row) {
-            params.push_back(w);
-        }
-    }
-    for (const auto& b : biases) {
-        params.push_back(b);
-    }
-    
-    return params;
+std::vector<TensorPtr> Linear::parameters() const {
+    return {weights, biases};
 }

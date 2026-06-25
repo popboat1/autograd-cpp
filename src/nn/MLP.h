@@ -12,9 +12,8 @@ public:
     // bias, dropout, norm_layer, inplace
     );
 
-    std::vector<ValuePtr> forward(const std::vector<ValuePtr>& xin); // forward pass
-
-    std::vector<ValuePtr> parameters() const override; // params
+    TensorPtr forward(const TensorPtr& xin); // forward pass
+    std::vector<TensorPtr> parameters() const override; // params
 
 private:
     std::string activation_layer;
