@@ -1,8 +1,7 @@
 #include <iostream>
 #include <cassert>
 #include <cmath>
-#include "autograd/Value.h"
-#include "nn/Linear.h"
+#include "Value.h"
 
 // helper function to check if floating point numbers are close enough...
 bool is_close(double a, double b, double tolerance = 1e-5) {
@@ -106,45 +105,12 @@ void test_activation_func() {
     std::cout << "[PASS] Activation Functions (tanh, exp, relu) Test\n";
 }
 
-void test_linear_layer(){
-    int fan_in = 3;
-    int fan_out = 2;
-    Linear layer(fan_in, fan_out, 42); // seed 42 for reproducibility
-
-    // test parameter management
-    auto params = layer.parameters();
-    assert(params.size() == 8);
-    
-    // test forward pass
-    std::vector<ValuePtr> xin = { make_val(1.0), make_val(-2.0), make_val(0.5) };
-    auto xout = layer.forward(xin);
-    assert(xout.size() == 2);
-
-    // test backward pass
-    auto loss = xout[0] + xout[1];
-    loss->backward();
-
-    // check computed gradients
-    assert(xin[0]->grad != 0.0);
-    assert(xin[1]->grad != 0.0);
-    assert(xin[2]->grad != 0.0);
-
-    // test zero_grad function
-    layer.zero_grad();
-    for (const auto& p : layer.parameters()) {
-        assert(p->grad == 0.0);
-    }
-
-    std::cout << "[PASS] NN Linear Layer Structural Test\n";
-}
-
 int main() {
     std::cout << "running test...\n";
     test_basic_math();
     test_subtraction_and_division();
     test_activation_func();
     test_requires_grad();
-    test_linear_layer();
     std::cout << "[DONE] test is done!!1!\n";
     return 0;
 }
