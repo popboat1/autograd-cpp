@@ -1,6 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include "Value.h"
+#include "autograd/Tensor.h"
 #include "nn/Linear.h"
 #include "nn/MLP.h"
 #include "optim/SGD.h"
@@ -9,34 +9,61 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(autograd_cpp, m) {
-    m.doc() = "C++ Autograd Engine Python Bindings";
+    m.doc() = "C++ ML Framework Python Bindings (Tensor Engine)";
 
-    py::class_<Value, std::shared_ptr<Value>>(m, "Value")
-        .def(py::init<double, bool>(), py::arg("val"), py::arg("requires_grad") = true)
-        .def_readwrite("data", &Value::data)
-        .def_readwrite("grad", &Value::grad)
-        .def_readwrite("op", &Value::op)
-        .def_property_readonly("requires_grad", [](const ValuePtr& self) { return self->requires_grad; })
+    // ----------------------------------------------------
+    // TENSOR BINDINGS
+    // ----------------------------------------------------
+    py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")
+        .def(py::init<std::vector<double>, std::vector<size_t>, bool>(), 
+             py::arg("values"), py::arg("shape"), py::arg("requires_grad") = true)
+        .def_property("data",
+            [](const TensorPtr& t) { return *t->data; }, // getter
+            [](TensorPtr& t, std::vector<double> v) { *t->data = v; } // setter
+        )
+        .def_property("grad",
+            [](const TensorPtr& t) { return *t->grad; },
+            [](TensorPtr& t, std::vector<double> v) { *t->grad = v; }
+        )
+        .def_readonly("shape", &Tensor::shape)
+        .def_readonly("strides", &Tensor::strides)
+        .def_property_readonly("requires_grad", [](const TensorPtr& self) { return self->requires_grad; })
         
-        .def("backward", &Value::backward)
-        .def("pow", &Value::pow)
-        .def("tanh", &Value::tanh)
-        .def("exp", &Value::exp)
-        .def("relu", &Value::relu)
-        .def("print", &Value::print)
+        .def("backward", &Tensor::backward)
+        
+        // operations
+        .def("sum", &Tensor::sum)
+        .def("mean", &Tensor::mean, py::arg("dim"), py::arg("keepdim") = false)
+        .def("max", &Tensor::max, py::arg("dim"), py::arg("keepdim") = false)
+        .def("argmax", &Tensor::argmax, py::arg("dim"), py::arg("keepdim") = false)
+        .def("transpose", &Tensor::transpose, py::arg("dim0"), py::arg("dim1"))
+        .def("view", &Tensor::view, py::arg("target_shape"))
+        
+        // math/activations
+        .def("pow", &Tensor::pow)
+        .def("tanh", &Tensor::tanh)
+        .def("exp", &Tensor::exp)
+        .def("relu", &Tensor::relu)
+        .def("sigmoid", &Tensor::sigmoid)
+        .def("log", &Tensor::log)
+        .def("print", &Tensor::print)
 
-        .def("__add__", [](const ValuePtr& lhs, const ValuePtr& rhs) { return lhs + rhs; })
-        .def("__mul__", [](const ValuePtr& lhs, const ValuePtr& rhs) { return lhs * rhs; })
-        .def("__sub__", [](const ValuePtr& lhs, const ValuePtr& rhs) { return lhs - rhs; })
-        .def("__truediv__", [](const ValuePtr& lhs, const ValuePtr& rhs) { return lhs / rhs; })
-        .def("__pow__", [](const ValuePtr& self, double exponent) { return self->pow(exponent); });
+        // magic methods
+        .def("__add__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return lhs + rhs; })
+        .def("__sub__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return lhs - rhs; })
+        .def("__mul__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return lhs * rhs; })
+        .def("__truediv__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return lhs / rhs; })
+        
+        // map matmul to @ operator
+        .def("__matmul__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return Tensor::matmul(lhs, rhs); });
     
+    // ----------------------------------------------------
+    // NEURAL NETWORK BINDINGS
+    // ----------------------------------------------------
     py::class_<Linear>(m, "Linear")
         .def(py::init<int, int, int>(), py::arg("fan_in"), py::arg("fan_out"), py::arg("seed") = 42)
         .def("forward", &Linear::forward)
         .def("parameters", &Linear::parameters);
-
-    m.def("make_val", &make_val, py::arg("val"), py::arg("requires_grad") = true, "helper function to generate a shared_ptr node");
 
     py::class_<MLP>(m, "MLP")
         .def(py::init<int, std::vector<int>, std::string, int>(), 
@@ -47,10 +74,13 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("forward", &MLP::forward)
         .def("parameters", &MLP::parameters);
     
+    // ----------------------------------------------------
+    // OPTIMIZER & LOSS BINDINGS
+    // ----------------------------------------------------
     auto m_optim = m.def_submodule("optim", "optimization sub-algorithms manager");
 
     py::class_<SGD>(m_optim, "SGD")
-        .def(py::init<std::vector<ValuePtr>, double, double, double>(),
+        .def(py::init<std::vector<TensorPtr>, double, double, double>(),
              py::arg("params"),
              py::arg("lr"),
              py::arg("momentum") = 0.0,
@@ -61,8 +91,4 @@ PYBIND11_MODULE(autograd_cpp, m) {
     py::class_<MSELoss>(m, "MSELoss")
         .def(py::init<>())
         .def("__call__", &MSELoss::operator());
-
-    py::class_<CrossEntropyLoss>(m, "CrossEntropyLoss")
-        .def(py::init<>())
-        .def("__call__", &CrossEntropyLoss::operator());
 }

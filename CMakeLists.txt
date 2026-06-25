@@ -32,7 +32,6 @@ FetchContent_MakeAvailable(pybind11)
 
 add_executable(autograd_main
     src/main.cpp
-    src/autograd/Value.cpp
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
@@ -42,7 +41,6 @@ add_executable(autograd_main
 
 # compile to python library
 pybind11_add_module(autograd_cpp 
-    src/autograd/Value.cpp
     src/autograd/bindings.cpp
     src/nn/Linear.cpp
     src/nn/MLP.cpp
