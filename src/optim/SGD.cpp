@@ -12,7 +12,7 @@ SGD::SGD(std::vector<TensorPtr> params, double lr, double momentum, double weigh
 
 void SGD::step(){
     for(size_t i {0}; i < params.size(); ++i){
-        for(size_t j {0}; j > params[i]->data->size(); ++j){
+        for(size_t j {0}; j < params[i]->data->size(); ++j){
             double gradient = (*params[i]->grad)[j];
 
             if(wd > 0.0){
