@@ -14,7 +14,7 @@ public:
     // function to clear grads before training step
     void zero_grad() {
         for (auto& p : parameters()){
-            std::fill(p->grad->begin(), p->grad->end(), 0.0);
+            p->zero_grad();
         }
     }
 };

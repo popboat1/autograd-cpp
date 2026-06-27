@@ -72,8 +72,13 @@ public:
 
     // helper to map multidimensional index arrays to 1D flat storage offset
     size_t get_flat_index(const std::vector<size_t>& indices) const;
-
+    bool is_contiguous() const;
+    TensorPtr contiguous();
     void backward();
+
+    // in-place mutators & encapsulated ops
+    TensorPtr add_(const TensorPtr& other);
+    void zero_grad();
 
     // operations
     static TensorPtr matmul(const TensorPtr& lhs, const TensorPtr& rhs);

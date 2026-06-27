@@ -190,6 +190,83 @@ Tensor::ReductionMeta Tensor::prepare_reduction_metadata(size_t dim, bool keepdi
     return meta;
 }
 
+// verifies if row-major order perfectly aligns with standard memory sequences
+bool Tensor::is_contiguous() const {
+    size_t expected_stride = 1;
+    for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+        if (shape[i] != 1 && strides[i] != expected_stride) {
+            return false;
+        }
+        expected_stride *= shape[i];
+    }
+    return true;
+}
+
+// deep-copies data layouts to establish standard physical contiguity
+TensorPtr Tensor::contiguous() {
+    if (is_contiguous()) {
+        return shared_from_this();
+    }
+    
+    std::vector<double> contiguous_values(data->size());
+    std::vector<size_t> coords(shape.size(), 0);
+    for (size_t i = 0; i < data->size(); ++i) {
+        contiguous_values[i] = (*data)[get_flat_index(coords)];
+        advance_coordinates(coords, shape);
+    }
+    
+    auto out = std::make_shared<Tensor>(contiguous_values, shape, std::vector<TensorPtr>{shared_from_this()}, "contiguous");
+    
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+    out->backward_func = [self, weak_out]() {
+        if (auto out_ptr = weak_out.lock()) {
+            std::vector<size_t> back_coords(self->shape.size(), 0);
+            for (size_t i = 0; i < self->data->size(); ++i) {
+                size_t flat_idx = self->get_flat_index(back_coords);
+                (*self->grad)[flat_idx] += (*out_ptr->grad)[i];
+                advance_coordinates(back_coords, self->shape);
+            }
+        }
+    };
+    return out;
+}
+
+// in-place addition supporting standard fast-paths and multi-dimensional coordinate loops
+TensorPtr Tensor::add_(const TensorPtr& other) {
+    if (is_contiguous() && other->is_contiguous() && shape == other->shape) {
+        for (size_t i = 0; i < data->size(); ++i) {
+            (*data)[i] += (*other->data)[i];
+        }
+    } else {
+        std::vector<size_t> out_shape;
+        std::vector<size_t> lhs_b_strides;
+        std::vector<size_t> rhs_b_strides;
+        compute_broadcast_metadata(shared_from_this(), other, out_shape, lhs_b_strides, rhs_b_strides);
+        
+        if (out_shape != this->shape) {
+            throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
+        }
+        
+        std::vector<size_t> coords(out_shape.size(), 0);
+        size_t total_elements = data->size();
+        for (size_t i = 0; i < total_elements; ++i) {
+            size_t flat_lhs = get_flat_index_from_broadcast(coords, lhs_b_strides);
+            size_t flat_rhs = get_flat_index_from_broadcast(coords, rhs_b_strides);
+            (*data)[flat_lhs] += (*other->data)[flat_rhs];
+            advance_coordinates(coords, out_shape);
+        }
+    }
+    return shared_from_this();
+}
+
+// zeroes the internal gradient vector array
+void Tensor::zero_grad() {
+    if (grad) {
+        std::fill(grad->begin(), grad->end(), 0.0);
+    }
+}
+
 // addition op
 TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
     std::vector<size_t> out_shape;
@@ -615,10 +692,13 @@ TensorPtr Tensor::transpose(size_t dim0, size_t dim1) {
 // ReLU
 TensorPtr Tensor::relu(){
     std::vector<double> out_vals(data->size());
+    std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
     for(size_t i {0}; i < data->size(); ++i){
-        out_vals[i] = (*data)[i] > 0.0 ? (*data)[i] : 0.0;
+        size_t flat_idx = get_flat_index(coords);
+        out_vals[i] = (*data)[flat_idx] > 0.0 ? (*data)[flat_idx] : 0.0;
+        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "relu");
@@ -628,10 +708,12 @@ TensorPtr Tensor::relu(){
     auto self = shared_from_this();
     out->backward_func = [self, weak_out](){
         if(auto out_ptr = weak_out.lock()){
-            for(size_t i {0}; i < self->data->size(); ++i){
-                // local derivative is 1 if x > 0 else 0
-                double local_derivative = (*self->data)[i] > 0.0 ? 1.0 : 0.0;
-                (*self->grad)[i] += (*out_ptr->grad)[i] * local_derivative;
+            std::vector<size_t> back_coords(self->shape.size(), 0);
+            for(size_t i = 0; i < self->data->size(); ++i){
+                size_t flat_idx = self->get_flat_index(back_coords);
+                double local_derivative = (*self->data)[flat_idx] > 0.0 ? 1.0 : 0.0;
+                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
+                advance_coordinates(back_coords, self->shape);
             }
         }
     };
@@ -642,10 +724,13 @@ TensorPtr Tensor::relu(){
 // exp function
 TensorPtr Tensor::exp(){
     std::vector<double> out_vals(data->size());
+    std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
     for(size_t i {0}; i < data->size(); ++i){
-        out_vals[i] = std::exp((*data)[i]);
+        size_t flat_idx = get_flat_index(coords);
+        out_vals[i] = std::exp((*data)[flat_idx]);
+        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "exp");
@@ -655,8 +740,11 @@ TensorPtr Tensor::exp(){
     auto self = shared_from_this();
     out->backward_func = [self, weak_out]() {
         if(auto out_ptr = weak_out.lock()){
-            for(size_t i {0}; i < self->data->size(); ++i){
-                (*self->grad)[i] += (*out_ptr->grad)[i] * (*out_ptr->data)[i];
+            std::vector<size_t> back_coords(self->shape.size(), 0);
+            for(size_t i = 0; i < self->data->size(); ++i){
+                size_t flat_idx = self->get_flat_index(back_coords);
+                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (*out_ptr->data)[i];
+                advance_coordinates(back_coords, self->shape);
             }
         }
     };
@@ -667,10 +755,13 @@ TensorPtr Tensor::exp(){
 //tanh function
 TensorPtr Tensor::tanh(){
     std::vector<double> out_vals (data->size());
+    std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
     for(size_t i {0}; i < data->size(); ++i){
-        out_vals[i] = std::tanh((*data)[i]);
+        size_t flat_idx = get_flat_index(coords);
+        out_vals[i] = std::tanh((*data)[flat_idx]);
+        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "tanh");
@@ -680,10 +771,12 @@ TensorPtr Tensor::tanh(){
     auto self = shared_from_this();
     out->backward_func = [self, weak_out](){
         if(auto out_ptr = weak_out.lock()){
-            for(size_t i {0}; i < self->data->size(); ++i){
+            std::vector<size_t> back_coords(self->shape.size(), 0);
+            for(size_t i = 0; i < self->data->size(); ++i){
+                size_t flat_idx = self->get_flat_index(back_coords);
                 double t = (*out_ptr->data)[i];
-                // d/dx tanh(x) is 1 - tanh^2(x)
-                (*self->grad)[i] += (*out_ptr->grad)[i] * (1.0 - t * t);
+                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 - t * t);
+                advance_coordinates(back_coords, self->shape);
             }
         }
     };
@@ -695,10 +788,13 @@ TensorPtr Tensor::tanh(){
 // sigmoid function
 TensorPtr Tensor::sigmoid(){
     std::vector<double> out_vals(data->size());
+    std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
     for(size_t i {0}; i < data->size(); ++i){
-        out_vals[i] = 1.0 / (1 + std::exp(-(*data)[i]));
+        size_t flat_idx = get_flat_index(coords);
+        out_vals[i] = 1.0 / (1.0 + std::exp(-(*data)[flat_idx]));
+        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "sigmoid");
@@ -708,10 +804,12 @@ TensorPtr Tensor::sigmoid(){
     auto self = shared_from_this();
     out->backward_func = [self, weak_out]() {
         if(auto out_ptr = weak_out.lock()){
-            for(size_t i {0}; i < self->data->size(); ++i){
-                // d/dx sigmoid(x) is sigmoid(x) * (1 - sigmoid(x))
+            std::vector<size_t> back_coords(self->shape.size(), 0);
+            for(size_t i = 0; i < self->data->size(); ++i){
+                size_t flat_idx = self->get_flat_index(back_coords);
                 double s = (*out_ptr->data)[i];
-                (*self->grad)[i] += (*out_ptr->grad)[i] * (s * (1.0 - s));
+                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (s * (1.0 - s));
+                advance_coordinates(back_coords, self->shape);
             }
         }
     };
@@ -722,10 +820,13 @@ TensorPtr Tensor::sigmoid(){
 // log function (natural log)
 TensorPtr Tensor::log(){
     std::vector<double> out_vals(data->size());
+    std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
     for(size_t i {0}; i < data->size(); ++i){
-        out_vals[i] = std::log((*data)[i]);
+        size_t flat_idx = get_flat_index(coords);
+        out_vals[i] = std::log((*data)[flat_idx]);
+        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "log");
@@ -735,9 +836,11 @@ TensorPtr Tensor::log(){
     std::weak_ptr<Tensor> weak_out = out;
     out->backward_func = [self, weak_out]() {
         if(auto out_ptr = weak_out.lock()){
-            for(size_t i {0}; i < self->data->size(); ++i){
-                // local derivative of ln(x) is 1/x
-                (*self->grad)[i] += (*out_ptr->grad)[i] * (1.0 / (*self->data)[i]);
+            std::vector<size_t> back_coords(self->shape.size(), 0);
+            for(size_t i = 0; i < self->data->size(); ++i){
+                size_t flat_idx = self->get_flat_index(back_coords);
+                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 / (*self->data)[flat_idx]);
+                advance_coordinates(back_coords, self->shape);
             }
         }
     };
@@ -748,10 +851,13 @@ TensorPtr Tensor::log(){
 // pow function
 TensorPtr Tensor::pow(double exponent){
     std::vector<double> out_vals (data->size());
+    std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
     for(size_t i {0}; i < data->size(); ++i){
-        out_vals[i] = std::pow((*data)[i], exponent);
+        size_t flat_idx = get_flat_index(coords);
+        out_vals[i] = std::pow((*data)[flat_idx], exponent);
+        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "pow");
@@ -759,14 +865,15 @@ TensorPtr Tensor::pow(double exponent){
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
-    
     // explicitly capture the exponent by value
     out->backward_func = [self, weak_out, exponent]() {
         if (auto out_ptr = weak_out.lock()) {
-            for (size_t i {0}; i < self->data->size(); ++i) {
-                // local derivative of x^n is n * x^(n-1)
-                double local_derivative = exponent * std::pow((*self->data)[i], exponent - 1.0);
-                (*self->grad)[i] += (*out_ptr->grad)[i] * local_derivative;
+            std::vector<size_t> back_coords(self->shape.size(), 0);
+            for (size_t i = 0; i < self->data->size(); ++i) {
+                size_t flat_idx = self->get_flat_index(back_coords);
+                double local_derivative = exponent * std::pow((*self->data)[flat_idx], exponent - 1.0);
+                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
+                advance_coordinates(back_coords, self->shape);
             }
         }
     };
@@ -1035,6 +1142,10 @@ void Tensor::backward() {
 
 // tensor.view() function
 TensorPtr Tensor::view(const std::vector<int>& target_shape){
+    if (!is_contiguous()) {
+        throw std::runtime_error("View is incompatible with non-contiguous layouts. Explicitly call .contiguous() first.");
+    }
+
     size_t total_elements = this->data->size();
     size_t product_of_other_dims = 1;
     int negative_one_idx = -1;
@@ -1062,11 +1173,9 @@ TensorPtr Tensor::view(const std::vector<int>& target_shape){
             throw std::invalid_argument("total element capacity mismatch for requested shape layout");
         }
         resolved_shape[negative_one_idx] = total_elements / product_of_other_dims;
-    } else {
-        // guard if no -1 is provided
-        if(product_of_other_dims != total_elements){
+    // guard if no -1 is provided
+    } else if(product_of_other_dims != total_elements){
             throw std::invalid_argument("requested shape does not match total elements");
-        }
     }
 
     // calculate contigous row-major strides for the newly resolved shape layout

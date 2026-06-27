@@ -28,6 +28,6 @@ void SGD::step(){
 
 void SGD::zero_grad() {
     for(auto& p : params){
-        std::fill(p->grad->begin(), p->grad->end(), 0.0);
+        p->zero_grad();
     }
 }
