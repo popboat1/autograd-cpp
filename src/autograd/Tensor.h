@@ -89,8 +89,7 @@ public:
     friend TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs);
     friend TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs);
     TensorPtr transpose(size_t dim0, size_t dim1);
-    TensorPtr sum();
-
+    
     // more element wise math ops & activation fns
     TensorPtr relu();
     TensorPtr exp();
@@ -98,8 +97,9 @@ public:
     TensorPtr sigmoid();
     TensorPtr log();
     TensorPtr pow(double exponent);
-
+    
     // dimensional reduction ops
+    TensorPtr sum(size_t dim, bool keepdim = false);
     TensorPtr mean(size_t dim, bool keepdim = false);
     TensorPtr max(size_t dim, bool keepdim = false);
     TensorPtr min(size_t dim, bool keepdim = false);

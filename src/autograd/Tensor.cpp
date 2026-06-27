@@ -655,25 +655,52 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
 }
 
 // sum function
-TensorPtr Tensor::sum(){
-    std::vector<double> out_values(1, 0.0);
-    for (double val : (*this->data)) {
-        out_values[0] += val;
+TensorPtr Tensor::sum(size_t dim, bool keepdim){
+    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
+
+    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+    // forward pass
+    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+            size_t out_flat = outer * meta.inner_block_size + inner;
+
+            double sum = 0.0;
+
+            for(size_t r {0}; r < meta.reduced_size; ++r){
+                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+
+                sum += (*data)[self_flat];
+            }
+
+            out_vals[out_flat] = sum;
+        }
     }
 
-    auto out = std::make_shared<Tensor>(out_values, std::vector<size_t>{1}, std::vector<TensorPtr>{shared_from_this()}, "sum");
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{shared_from_this()}, "sum");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
 
-    out->backward_func = [self, weak_out]() {
-        if (auto out_ptr = weak_out.lock()){
-            double upstream_grad = (*out_ptr->grad)[0];
-            // broadcast the scalar gradient to every single native data location
-            if (self->requires_grad){
-                for (size_t i = 0; i < self->grad->size(); ++i) {
-                    (*self->grad)[i] += upstream_grad;
+    size_t outer_bs = meta.outer_block_size;
+    size_t inner_bs = meta.inner_block_size;
+    size_t r_size = meta.reduced_size;
+
+    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size](){
+        if(auto out_ptr = weak_out.lock()){
+
+            for (size_t outer {0}; outer < outer_bs; ++outer) {
+                for (size_t inner {0}; inner < inner_bs; ++inner) {
+                    size_t out_flat = outer * inner_bs + inner;
+                    double upstream_grad = (*out_ptr->grad)[out_flat];
+
+                    if(self->requires_grad){
+                        for (size_t r {0}; r < r_size; ++r) {
+                            size_t self_flat = outer * (r_size * inner_bs) + r * inner_bs + inner;
+                            (*self->grad)[self_flat] += upstream_grad;
+                        }
+                    }
                 }
             }
         }
