@@ -32,7 +32,9 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("backward", &Tensor::backward)
         
         // operations
-        .def("sum", &Tensor::sum)
+        .def("sum", py::overload_cast<>(&Tensor::sum))
+        .def("sum", py::overload_cast<size_t, bool>(&Tensor::sum), 
+             py::arg("dim"), py::arg("keepdim") = false)
         .def("mean", &Tensor::mean, py::arg("dim"), py::arg("keepdim") = false)
         .def("max", &Tensor::max, py::arg("dim"), py::arg("keepdim") = false)
         .def("argmax", &Tensor::argmax, py::arg("dim"), py::arg("keepdim") = false)

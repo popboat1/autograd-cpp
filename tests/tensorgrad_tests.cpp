@@ -106,19 +106,30 @@ int main() {
     std::cout << "[PASS] element-wise multiplication forward and backward passes verified successfully\n";
 
 
-    // test 8: checking tensor sum reduction forward and backward passes
+    // test 8: checking tensor sum reduction along a specific dimension (forward and backward passes)  
     auto mat_to_sum = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0}, std::vector<size_t>{2, 2}, true);
-    auto sum_out = mat_to_sum->sum();
     
+    // Sum along dimension 0, keepdim = true    
+    auto sum_out_kd = mat_to_sum->sum(0, true);
+    assert(sum_out_kd->shape.size() == 2);
+    assert(sum_out_kd->shape[0] == 1 && sum_out_kd->shape[1] == 2);
+    assert(close_enough((*sum_out_kd->data)[0], 4.0));   
+    assert(close_enough((*sum_out_kd->data)[1], 6.0));    
+    
+    // Sum along dimension 1, keepdim = false
+    auto sum_out = mat_to_sum->sum(1, false);
     assert(sum_out->shape.size() == 1);
-    assert(sum_out->shape[0] == 1);
-    assert(close_enough((*sum_out->data)[0], 10.0));
-
+    assert(sum_out->shape[0] == 2);
+    assert(close_enough((*sum_out->data)[0], 3.0));
+    assert(close_enough((*sum_out->data)[1], 7.0));
+    
     sum_out->backward();
     assert(close_enough((*mat_to_sum->grad)[0], 1.0));
+    assert(close_enough((*mat_to_sum->grad)[1], 1.0));
+    assert(close_enough((*mat_to_sum->grad)[2], 1.0));
     assert(close_enough((*mat_to_sum->grad)[3], 1.0));
-    std::cout << "[PASS] tensor total sum reduction forward and backward passes verified successfully\n";
-
+    
+    std::cout << "[PASS] tensor dimensional sum reduction forward and backward passes verified successfully\n";
 
     // test 9: checking advanced N-dimensional shape broadcasting and zero-stride autograd reduction
     std::vector<double> vals_3d = {1, 2, 3,  4, 5, 6,  7, 8, 9,  10, 11, 12};

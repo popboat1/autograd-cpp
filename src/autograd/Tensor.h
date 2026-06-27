@@ -80,6 +80,7 @@ public:
 
     // in-place mutators & encapsulated ops
     TensorPtr add_(const TensorPtr& other);
+    TensorPtr sub_(const TensorPtr& other);
     void zero_grad();
 
     // operations
@@ -89,6 +90,11 @@ public:
     friend TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs);
     friend TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs);
     TensorPtr transpose(size_t dim0, size_t dim1);
+    TensorPtr sum();
+
+    // tensor * scalar multiplications
+    friend TensorPtr operator*(const TensorPtr& lhs, double rhs);
+    friend TensorPtr operator*(double lhs, const TensorPtr& rhs);
     
     // more element wise math ops & activation fns
     TensorPtr relu();

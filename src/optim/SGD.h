@@ -14,7 +14,7 @@ public:
 
 private:
     std::vector<TensorPtr> params;
-    std::vector<std::vector<double>> velocities;
+    std::vector<TensorPtr> velocities;
     double lr;
     double momentum_factor;
     double wd;

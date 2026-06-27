@@ -266,6 +266,34 @@ TensorPtr Tensor::add_(const TensorPtr& other) {
     return shared_from_this();
 }
 
+// in-place substraction
+TensorPtr Tensor::sub_(const TensorPtr& other) {
+    if (is_contiguous() && other->is_contiguous() && shape == other->shape) {
+        for (size_t i = 0; i < data->size(); ++i) {
+            (*data)[i] -= (*other->data)[i];
+        }
+    } else {
+        std::vector<size_t> out_shape;
+        std::vector<size_t> lhs_b_strides;
+        std::vector<size_t> rhs_b_strides;
+        compute_broadcast_metadata(shared_from_this(), other, out_shape, lhs_b_strides, rhs_b_strides);
+        
+        if (out_shape != this->shape) {
+            throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
+        }
+        
+        std::vector<size_t> coords(out_shape.size(), 0);
+        size_t total_elements = data->size();
+        for (size_t i = 0; i < total_elements; ++i) {
+            size_t flat_lhs = get_flat_index_from_broadcast(coords, lhs_b_strides);
+            size_t flat_rhs = get_flat_index_from_broadcast(coords, rhs_b_strides);
+            (*data)[flat_lhs] -= (*other->data)[flat_rhs];
+            advance_coordinates(coords, out_shape);
+        }
+    }
+    return shared_from_this();
+}
+
 // zeroes the internal gradient vector array
 void Tensor::zero_grad() {
     if (grad) {
@@ -437,6 +465,42 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
     };
 
     return out;
+}
+
+// tensor * scalar ops
+TensorPtr operator*(const TensorPtr& lhs, double rhs) {
+    size_t total_elements = lhs->data->size();
+    std::vector<double> out_values(total_elements);
+    std::vector<size_t> coords(lhs->shape.size(), 0);
+    
+    for (size_t i = 0; i < total_elements; ++i) {
+        size_t flat_idx = lhs->get_flat_index(coords);
+        out_values[i] = (*lhs->data)[flat_idx] * rhs;
+        Tensor::advance_coordinates(coords, lhs->shape);
+    }
+
+    auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::vector<TensorPtr>{lhs}, "*");
+
+    std::weak_ptr<Tensor> weak_out = out;
+    out->backward_func = [lhs, rhs, weak_out]() {
+        if (auto out_ptr = weak_out.lock()) {
+            if (lhs->requires_grad) {
+                std::vector<size_t> back_coords(lhs->shape.size(), 0);
+                size_t elements = lhs->data->size();
+                for (size_t i = 0; i < elements; ++i) {
+                    size_t flat_idx = lhs->get_flat_index(back_coords);
+                    (*lhs->grad)[flat_idx] += (*out_ptr->grad)[i] * rhs;
+                    Tensor::advance_coordinates(back_coords, lhs->shape);
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+TensorPtr operator*(double lhs, const TensorPtr& rhs) {
+    return rhs * lhs;
 }
 
 // division op
@@ -654,7 +718,34 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     return out;
 }
 
-// sum function
+//sum function
+TensorPtr Tensor::sum() {
+    std::vector<double> out_values(1, 0.0);
+    for (double val : (*this->data)) {
+        out_values[0] += val;
+    }
+
+    auto out = std::make_shared<Tensor>(out_values, std::vector<size_t>{1}, std::vector<TensorPtr>{shared_from_this()}, "sum");
+
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+
+    out->backward_func = [self, weak_out]() {
+        if (auto out_ptr = weak_out.lock()) {
+            double upstream_grad = (*out_ptr->grad)[0];
+            // Safe lazy gradient allocation loop guard
+            if (self->requires_grad) {
+                for (size_t i = 0; i < self->data->size(); ++i) {
+                    (*self->grad)[i] += upstream_grad;
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+// sum function with dimensions
 TensorPtr Tensor::sum(size_t dim, bool keepdim){
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
 
