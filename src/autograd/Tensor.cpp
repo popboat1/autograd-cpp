@@ -9,7 +9,7 @@
 // constructor for leaf nodes
 Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requires_grad)
     : data(std::make_shared<std::vector<double>>(values)),
-      grad(std::make_shared<std::vector<double>>(values.size(), 0.0)),
+      grad(nullptr),
       shape(shape), requires_grad(requires_grad), op(""), backward_func([](){}) {
     
     // compute row-major strides
@@ -24,7 +24,7 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requi
 // graph constructor for operations
 Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation)
     : data(std::make_shared<std::vector<double>>(values)), 
-      grad(std::make_shared<std::vector<double>>(values.size(), 0.0)),
+      grad(nullptr),
       shape(shape), requires_grad(false), prev(children), op(operation), backward_func([](){}){
 
     // compute strides for the new shape layout
@@ -190,6 +190,12 @@ Tensor::ReductionMeta Tensor::prepare_reduction_metadata(size_t dim, bool keepdi
     return meta;
 }
 
+void Tensor::ensure_grad_allocated(){
+    if(grad == nullptr){
+        grad = (std::make_shared<std::vector<double>>(data->size(), 0.0));
+    }
+}
+
 // verifies if row-major order perfectly aligns with standard memory sequences
 bool Tensor::is_contiguous() const {
     size_t expected_stride = 1;
@@ -312,8 +318,8 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
                 auto upstream_grad = (*out_ptr->grad)[i];
 
                 // zero-stride values automatically combine multi-dimensional gradients here
-                (*lhs->grad)[flat_lhs] += upstream_grad;
-                (*rhs->grad)[flat_rhs] += upstream_grad;
+                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad;
+                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] += upstream_grad;
 
                 // step backward coordinate tracking layout forward
                 Tensor::advance_coordinates(back_idx, out_shape);
@@ -369,8 +375,8 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
                 auto upstream_grad = (*out_ptr->grad)[i];
 
                 // zero-stride values automatically combine multi-dimensional gradients here
-                (*lhs->grad)[flat_lhs] += upstream_grad;
-                (*rhs->grad)[flat_rhs] -= upstream_grad;
+                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad;
+                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] -= upstream_grad;
 
                 // step backward coordinate tracking layout forward
                 Tensor::advance_coordinates(back_idx, out_shape);
@@ -422,8 +428,8 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
                 
                 auto upstream_grad = (*out_ptr->grad)[i];
 
-                (*lhs->grad)[flat_lhs] += upstream_grad * (*rhs->data)[flat_rhs];
-                (*rhs->grad)[flat_rhs] += upstream_grad * (*lhs->data)[flat_lhs];
+                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad * (*rhs->data)[flat_rhs];
+                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] += upstream_grad * (*lhs->data)[flat_lhs];
 
                 Tensor::advance_coordinates(back_idx, out_shape);
             }
@@ -478,10 +484,10 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
                 double rhs_val = (*rhs->data)[flat_rhs];
 
                 // d(x/y) / dx = 1 / y
-                (*lhs->grad)[flat_lhs] += upstream_grad / rhs_val;
+                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad / rhs_val;
                 
                 // d(x/y) / dy = -x / y^2
-                (*rhs->grad)[flat_rhs] -= upstream_grad * (lhs_val / (rhs_val * rhs_val));
+                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] -= upstream_grad * (lhs_val / (rhs_val * rhs_val));
 
                 Tensor::advance_coordinates(back_idx, out_shape);
             }
@@ -609,30 +615,34 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
                 size_t batch_out_off = b * M * N;
 
                 // dL/dLHS = dL/dOut * RHS^T
-                for (size_t i = 0; i < M; ++i) {
-                    for (size_t k = 0; k < K; ++k) {
-                        double grad_sum = 0.0;
-                        for (size_t j = 0; j < N; ++j) {
-                            size_t out_flat = batch_out_off + i * N + j;
-                            size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
-                            grad_sum += (*out_ptr->grad)[out_flat] * (*rhs->data)[rhs_flat];
+                if(lhs->requires_grad){
+                    for (size_t i = 0; i < M; ++i) {
+                        for (size_t k = 0; k < K; ++k) {
+                            double grad_sum = 0.0;
+                            for (size_t j = 0; j < N; ++j) {
+                                size_t out_flat = batch_out_off + i * N + j;
+                                size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
+                                grad_sum += (*out_ptr->grad)[out_flat] * (*rhs->data)[rhs_flat];
+                            }
+                            size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
+                            (*lhs->grad)[lhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
                         }
-                        size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
-                        (*lhs->grad)[lhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
                     }
                 }
 
                 // dL/dRHS = LHS^T * dL/dOut
-                for (size_t k = 0; k < K; ++k) {
-                    for (size_t j = 0; j < N; ++j) {
-                        double grad_sum = 0.0;
-                        for (size_t i = 0; i < M; ++i) {
-                            size_t out_flat = batch_out_off + i * N + j;
-                            size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
-                            grad_sum += (*lhs->data)[lhs_flat] * (*out_ptr->grad)[out_flat];
+                if(rhs->requires_grad){
+                    for (size_t k = 0; k < K; ++k) {
+                        for (size_t j = 0; j < N; ++j) {
+                            double grad_sum = 0.0;
+                            for (size_t i = 0; i < M; ++i) {
+                                size_t out_flat = batch_out_off + i * N + j;
+                                size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
+                                grad_sum += (*lhs->data)[lhs_flat] * (*out_ptr->grad)[out_flat];
+                            }
+                            size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
+                            (*rhs->grad)[rhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
                         }
-                        size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
-                        (*rhs->grad)[rhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
                     }
                 }
 
@@ -661,8 +671,10 @@ TensorPtr Tensor::sum(){
         if (auto out_ptr = weak_out.lock()){
             double upstream_grad = (*out_ptr->grad)[0];
             // broadcast the scalar gradient to every single native data location
-            for (size_t i = 0; i < self->grad->size(); ++i) {
-                (*self->grad)[i] += upstream_grad;
+            if (self->requires_grad){
+                for (size_t i = 0; i < self->grad->size(); ++i) {
+                    (*self->grad)[i] += upstream_grad;
+                }
             }
         }
     };
@@ -681,6 +693,10 @@ TensorPtr Tensor::transpose(size_t dim0, size_t dim1) {
     // swap metadata dimensions
     std::swap(new_shape[dim0], new_shape[dim1]);
     std::swap(new_strides[dim0], new_strides[dim1]);
+
+    if(this->requires_grad == true){
+        this->ensure_grad_allocated();
+    }
 
     // build the new output tensor
     auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "transpose");
@@ -712,7 +728,9 @@ TensorPtr Tensor::relu(){
             for(size_t i = 0; i < self->data->size(); ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double local_derivative = (*self->data)[flat_idx] > 0.0 ? 1.0 : 0.0;
-                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
+                if (self->requires_grad){
+                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
+                }
                 advance_coordinates(back_coords, self->shape);
             }
         }
@@ -743,7 +761,9 @@ TensorPtr Tensor::exp(){
             std::vector<size_t> back_coords(self->shape.size(), 0);
             for(size_t i = 0; i < self->data->size(); ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
-                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (*out_ptr->data)[i];
+                if(self->requires_grad){
+                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (*out_ptr->data)[i];
+                }
                 advance_coordinates(back_coords, self->shape);
             }
         }
@@ -775,7 +795,9 @@ TensorPtr Tensor::tanh(){
             for(size_t i = 0; i < self->data->size(); ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double t = (*out_ptr->data)[i];
-                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 - t * t);
+                if(self->requires_grad){
+                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 - t * t);
+                }
                 advance_coordinates(back_coords, self->shape);
             }
         }
@@ -808,7 +830,9 @@ TensorPtr Tensor::sigmoid(){
             for(size_t i = 0; i < self->data->size(); ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double s = (*out_ptr->data)[i];
-                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (s * (1.0 - s));
+                if(self->requires_grad){
+                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (s * (1.0 - s));
+                }
                 advance_coordinates(back_coords, self->shape);
             }
         }
@@ -839,7 +863,9 @@ TensorPtr Tensor::log(){
             std::vector<size_t> back_coords(self->shape.size(), 0);
             for(size_t i = 0; i < self->data->size(); ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
-                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 / (*self->data)[flat_idx]);
+                if(self->requires_grad){
+                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 / (*self->data)[flat_idx]);
+                }
                 advance_coordinates(back_coords, self->shape);
             }
         }
@@ -872,7 +898,9 @@ TensorPtr Tensor::pow(double exponent){
             for (size_t i = 0; i < self->data->size(); ++i) {
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double local_derivative = exponent * std::pow((*self->data)[flat_idx], exponent - 1.0);
-                (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
+                if(self->requires_grad){
+                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
+                }
                 advance_coordinates(back_coords, self->shape);
             }
         }
@@ -927,9 +955,11 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
                     double upstream_grad = (*out_ptr->grad)[out_flat] * grad_scale;
 
                     // distribute it equally to all elements that formed the mean
-                    for (size_t r {0}; r < r_size; ++r) {
-                        size_t self_flat = outer * (r_size * inner_bs) + r * inner_bs + inner;
-                        (*self->grad)[self_flat] += upstream_grad;
+                    if(self->requires_grad){
+                        for (size_t r {0}; r < r_size; ++r) {
+                            size_t self_flat = outer * (r_size * inner_bs) + r * inner_bs + inner;
+                            (*self->grad)[self_flat] += upstream_grad;
+                        }
                     }
                 }
             }
@@ -979,9 +1009,11 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
     out->backward_func = [self, weak_out, max_indices, total_out_elements]() {
         if(auto out_ptr = weak_out.lock()){
             // gradient routing bypasses block math entirely; just map flat index to flat index
-            for (size_t i {0}; i < total_out_elements; ++i) {
-                size_t winner_flat_idx = (*max_indices)[i];
-                (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+            if(self->requires_grad){
+                for (size_t i {0}; i < total_out_elements; ++i) {
+                    size_t winner_flat_idx = (*max_indices)[i];
+                    (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+                }
             }
         }
     };
@@ -1029,9 +1061,11 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
     out->backward_func = [self, weak_out, min_indices, total_out_elements]() {
         if(auto out_ptr = weak_out.lock()){
             // gradient routing bypasses block math entirely; just map flat index to flat index
-            for (size_t i {0}; i < total_out_elements; ++i) {
-                size_t winner_flat_idx = (*min_indices)[i];
-                (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+            if(self->requires_grad){
+                for (size_t i {0}; i < total_out_elements; ++i) {
+                    size_t winner_flat_idx = (*min_indices)[i];
+                    (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+                }
             }
         }
     };
@@ -1127,10 +1161,15 @@ void Tensor::backward() {
 
     build_topo(shared_from_this());
 
+    for(auto& node : topo){
+        if(node->requires_grad == true){
+            node->ensure_grad_allocated();
+        }
+    }
+
     // out node start with grad 1.0
-    if (!grad->empty()) {
-        std::fill(grad->begin(), grad->end(), 1.0);
-    } 
+    this->ensure_grad_allocated();
+    std::fill(grad->begin(), grad->end(), 1.0);
 
     // process nodes in reverse topo order
     for(auto it = topo.rbegin(); it != topo.rend(); ++it){
@@ -1184,6 +1223,10 @@ TensorPtr Tensor::view(const std::vector<int>& target_shape){
         for(int i {static_cast<int>(resolved_shape.size()) - 2}; i >= 0; --i){
             new_strides[i] = new_strides[i + 1] * resolved_shape[i + 1];
         }
+    }
+
+    if(this->requires_grad == true){
+        this->ensure_grad_allocated();
     }
 
     // construct and return the view tracking node sharing the original flat data block

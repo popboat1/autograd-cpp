@@ -43,6 +43,8 @@ private:
     // helper function to calculate all the boilerplate metadata
     ReductionMeta prepare_reduction_metadata(size_t dim, bool keepdim) const;
 
+    void ensure_grad_allocated();
+
 public:
     // properties
     std::shared_ptr<std::vector<double>> data;
