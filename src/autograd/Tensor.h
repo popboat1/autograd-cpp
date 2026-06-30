@@ -25,12 +25,7 @@ private:
         const std::vector<size_t>& broadcast_strides
     );
 
-    // advances an N-dimensional coordinate vector right-to-left; returns false when fully complete
-    static bool advance_coordinates(
-        std::vector<size_t>& coords, 
-        const std::vector<size_t>& target_shape
-    );
-
+    
     // store calculated variables for dimensional reductions
     struct ReductionMeta {
         std::vector<size_t> out_shape;
@@ -39,13 +34,19 @@ private:
         size_t inner_block_size;
         size_t outer_block_size;
     };
-
+    
     // helper function to calculate all the boilerplate metadata
     ReductionMeta prepare_reduction_metadata(size_t dim, bool keepdim) const;
-
+    
     void ensure_grad_allocated();
-
+    
 public:
+    // advances an N-dimensional coordinate vector right-to-left; returns false when fully complete
+    static bool advance_coordinates(
+        std::vector<size_t>& coords, 
+        const std::vector<size_t>& target_shape
+    );
+    
     // properties
     std::shared_ptr<std::vector<double>> data;
     std::shared_ptr<std::vector<double>> grad;

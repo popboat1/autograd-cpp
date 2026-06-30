@@ -1,4 +1,5 @@
 #include "SGD.h"
+#include "autograd/Tensor.h"
 #include <vector>
 
 SGD::SGD(std::vector<TensorPtr> params, double lr, double momentum, double weight_decay)
@@ -14,18 +15,37 @@ void SGD::step(){
     for(size_t i {0}; i < params.size(); ++i){
         if (params[i]->grad == nullptr) continue;
 
-        // create a zero-copy tensor wrapper around the parameter's underlying gradient vector array
-        auto grad_tensor = std::make_shared<Tensor>(params[i]->grad, nullptr, params[i]->shape, std::vector<TensorPtr>{}, "grad_wrapper");
-        
-        if (wd > 0.0) {
-            grad_tensor->add_(params[i] * wd);
+        // handle rare non-contiguous parameters using coordinate maps
+        if (!params[i]->is_contiguous()) {
+            std::vector<size_t> coords(params[i]->shape.size(), 0);
+            size_t total_elements = params[i]->data->size();
+            
+            for (size_t j = 0; j < total_elements; ++j) {
+                size_t flat_idx = params[i]->get_flat_index(coords);
+                
+                double grad = (*params[i]->grad)[flat_idx];
+                if (wd > 0.0) {
+                    grad += wd * (*params[i]->data)[flat_idx];
+                }
+                
+                // velocities[i] is guaranteed contiguous by the constructor layout allocation
+                (*velocities[i]->data)[j] = (momentum_factor * (*velocities[i]->data)[j]) + grad;
+                (*params[i]->data)[flat_idx] -= lr * (*velocities[i]->data)[j];
+                
+                Tensor::advance_coordinates(coords, params[i]->shape);
+            }
+        } else {
+            size_t total_elements = params[i]->data->size();
+            for (size_t j = 0; j < total_elements; ++j) {
+                double grad = (*params[i]->grad)[j];
+                if (wd > 0.0) {
+                    grad += (wd * (*params[i]->data)[j]);
+                }
+                
+                (*velocities[i]->data)[j] = (momentum_factor * (*velocities[i]->data)[j]) + grad;
+                (*params[i]->data)[j] -= (lr * (*velocities[i]->data)[j]);
+            }
         }
-
-        // update velocity V = (V * momentum) + Grad
-        velocities[i] = (velocities[i] * momentum_factor) + grad_tensor;
-
-        // W -= V * lr
-        params[i]->sub_(velocities[i] * lr);
     }
 }
 
