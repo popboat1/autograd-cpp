@@ -720,6 +720,9 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
 
 //sum function
 TensorPtr Tensor::sum() {
+    // if non-contiguous, force contiguity to prevent physical memory misalignment
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
+
     std::vector<double> out_values(1, 0.0);
     for (double val : (*this->data)) {
         out_values[0] += val;
