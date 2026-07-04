@@ -724,22 +724,21 @@ TensorPtr Tensor::sum() {
     auto active_this = is_contiguous() ? shared_from_this() : contiguous();
 
     std::vector<double> out_values(1, 0.0);
-    for (double val : (*this->data)) {
+    for (double val : (*active_this->data)) {
         out_values[0] += val;
     }
 
-    auto out = std::make_shared<Tensor>(out_values, std::vector<size_t>{1}, std::vector<TensorPtr>{shared_from_this()}, "sum");
+    auto out = std::make_shared<Tensor>(out_values, std::vector<size_t>{1}, std::vector<TensorPtr>{active_this}, "sum");
 
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
 
-    out->backward_func = [self, weak_out]() {
+    out->backward_func = [active_this, weak_out]() {
         if (auto out_ptr = weak_out.lock()) {
             double upstream_grad = (*out_ptr->grad)[0];
             // Safe lazy gradient allocation loop guard
-            if (self->requires_grad) {
-                for (size_t i = 0; i < self->data->size(); ++i) {
-                    (*self->grad)[i] += upstream_grad;
+            if (active_this->requires_grad) {
+                for (size_t i = 0; i < active_this->data->size(); ++i) {
+                    (*active_this->grad)[i] += upstream_grad;
                 }
             }
         }
