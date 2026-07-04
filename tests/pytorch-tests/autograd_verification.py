@@ -5,10 +5,12 @@ official pytorch autograd
 
 import os
 import sys
+import math
 
 for path_dir in os.environ.get("PATH", "").split(os.pathsep):
     if os.path.exists(os.path.join(path_dir, "g++.exe")) or os.path.exists(os.path.join(path_dir, "gcc.exe")):
-        os.add_dll_directory(path_dir)
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(path_dir)
         break
 
 script_dir = os.path.dirname(os.path.abspath(__file__))   # framework/tests/pytorch
@@ -21,146 +23,144 @@ sys.path.append(build_dir)
 import torch
 import autograd_cpp
 
+# baseline numeric initialization constants
+A_vals = [0.5, -0.2, 0.1, 0.8, 0.3, -0.5]  # shape: (2, 3)
+B_vals = [0.2, 0.7, -0.4, 0.1, 0.6, -0.3]  # shape: (3, 2)
+C_vals = [0.1, 0.2, 0.3, 0.4]              # shape: (1, 4)
+D_vals = [2.0, 2.0, 2.0, 2.0]              # shape: (1, 4)
+E_vals = [0.5, 0.5, 0.5, 0.5]              # shape: (1, 4)
+F_vals = [2.0, 2.0, 2.0, 2.0]              # shape: (1, 4)
+
 def run_autograd_cpp():
-    a = autograd_cpp.make_val(-2.0)
-    b = autograd_cpp.make_val(3.0)
-    c = autograd_cpp.make_val(10.0)
+    # instantiate inputs as formal framework multi-dimensional tensors
+    A = autograd_cpp.Tensor(A_vals, [2, 3], True)
+    B = autograd_cpp.Tensor(B_vals, [3, 2], True)
+    C = autograd_cpp.Tensor(C_vals, [1, 4], True)
+    D = autograd_cpp.Tensor(D_vals, [1, 4], False)
+    E = autograd_cpp.Tensor(E_vals, [1, 4], False)
+    F = autograd_cpp.Tensor(F_vals, [1, 4], False)
     
-    # forward pass (same as main.cpp)
-    x1 = a * b
-    x2 = x1 + c
-    x3 = x2 - a
-    x4 = x3 / b
+    # structural matrix transformations
+    x1 = A @ B                        # matmul -> (2, 2)
+    x2 = x1.permute([1, 0])           # permute -> (2, 2) [non-contiguous view]
+    x3 = x2.reshape([4, 1])           # reshape -> (4, 1) [forces contiguity copy]
+    x4 = x3.squeeze(1)                # squeeze -> (4,)
+    x5 = x4.unsqueeze(0)              # unsqueeze -> (1, 4)
     
-    # activations
-    x5 = x4.tanh()
-    x6 = x5.exp()
-    x7 = x6.relu()
+    # Element-wise arithmetic tensor interactions
+    x6 = x5 + C                       # Addition
+    x7 = x6 * D                       # Multiplication
+    x8 = x7 - E                       # Subtraction
+    x9 = x8 / F                       # Division
+    x10 = x9.pow(2.0)                 # Power scalar scaling
     
-    L = x7**2
+    # Non-linear mathematical activations sequence
+    x11 = x10.relu().tanh().exp().sigmoid().log()
     
-    L.backward()
+    # Multi-dimensional structural reductions
+    x12 = x11.sum(1, True)            # Dimensional sum reduction -> (1, 1)
+    x13 = x12.mean(0, False)          # Dimensional mean reduction -> (1,)
+    
+    # Extra evaluation views checking index reductions safely (untracked)
+    _ = x11.max(1, False)
+    _ = x11.argmax(1, False)
+    
+    # Final global flat reduction scalar setup
+    Loss = x13.sum()
+    Loss.backward()
     
     return {
-        "L": L.data,
-        "da": a.grad,
-        "db": b.grad,
-        "dc": c.grad
+        "forward_out": Loss.data,
+        "grad_A": A.grad,
+        "grad_B": B.grad,
+        "grad_C": C.grad
     }
 
 def run_pytorch():
-    a = torch.tensor(-2.0, requires_grad=True)
-    b = torch.tensor(3.0, requires_grad=True)
-    c = torch.tensor(10.0, requires_grad=True)
+    # Mirror explicit execution graph setups natively inside torch
+    A = torch.tensor(A_vals, dtype=torch.float64).reshape(2, 3).clone().detach().requires_grad_(True)
+    B = torch.tensor(B_vals, dtype=torch.float64).reshape(3, 2).clone().detach().requires_grad_(True)
+    C = torch.tensor(C_vals, dtype=torch.float64).reshape(1, 4).clone().detach().requires_grad_(True)
+    D = torch.tensor(D_vals, dtype=torch.float64).reshape(1, 4)
+    E = torch.tensor(E_vals, dtype=torch.float64).reshape(1, 4)
+    F = torch.tensor(F_vals, dtype=torch.float64).reshape(1, 4)
     
-    # forward pass (same as main.cpp)
-    x1 = a * b
-    x2 = x1 + c
-    x3 = x2 - a
-    x4 = x3 / b
+    x1 = A @ B
+    x2 = x1.permute(1, 0)
+    x3 = x2.reshape(4, 1)
+    x4 = x3.squeeze(1)
+    x5 = x4.unsqueeze(0)
     
-    # activations
-    x5 = torch.tanh(x4)
-    x6 = torch.exp(x5)
-    x7 = torch.relu(x6)
+    x6 = x5 + C
+    x7 = x6 * D
+    x8 = x7 - E
+    x9 = x8 / F
+    x10 = x9.pow(2.0)
     
-    L = x7**2
+    x11 = torch.log(torch.sigmoid(torch.exp(torch.tanh(torch.relu(x10)))))
     
-    L.backward()
+    x12 = x11.sum(dim=1, keepdim=True)
+    x13 = x12.mean(dim=0, keepdim=False)
     
-    return {
-        "pytorch_L": L.item(),
-        "pytorch_da": a.grad.item(),
-        "pytorch_db": b.grad.item(),
-        "pytorch_dc": c.grad.item()
-    }
-    
-def run_requires_grad_cpp():
-    a = autograd_cpp.make_val(2.0, True)
-    b = autograd_cpp.make_val(3.0, False)
-    
-    c = b * b
-    Loss = a + c
+    Loss = x13.sum()
     Loss.backward()
     
     return {
-        "Loss": Loss.data,
-        "da": a.grad,
-        "db": b.grad
-    }
-
-def run_requires_grad_pytorch():
-    a = torch.tensor(2.0, requires_grad=True)
-    b = torch.tensor(3.0, requires_grad=False)
-    
-    c = b * b
-    Loss = a + c
-    Loss.backward()
-    
-    b_grad_val = 0.0 if b.grad is None else b.grad.item()
-    
-    return {
-        "pytorch_Loss": Loss.item(),
-        "pytorch_da": a.grad.item(),
-        "pytorch_db": b_grad_val
+        "forward_out": [Loss.item()],
+        "grad_A": A.grad.flatten().tolist(),
+        "grad_B": B.grad.flatten().tolist(),
+        "grad_C": C.grad.flatten().tolist()
     }
     
-def print_table(title, mappings):
-    print(f"\n--- {title} ---")
-    print(f"{'metric Node':<20} | {'autograd-cpp':<16} | {'pytorch':<16} | {'status'}")
-    print("-" * 75)
+def verify_and_print(title, cpp_list, pt_list, tol=1e-5):
+    print(f"\n=== Verifying Layout: {title} ===")
+    print(f"{'Index':<8} | {'autograd_cpp':<16} | {'pytorch':<16} | {'status'}")
+    print("-" * 60)
     
-    all_passed = True
-    for metric, cpp_val, pt_val in mappings:
-        if cpp_val is None:
-            print(f"[ERROR] missing data tracking block for: {metric}")
-            all_passed = False
-            continue
+    if len(cpp_list) != len(pt_list):
+        print(f"[ERROR] Dimensional element count mismatch: {len(cpp_list)} vs {len(pt_list)}")
+        return False
         
-        match = abs(cpp_val - pt_val) < 1e-5
+    passed = True
+    for i, (cpp_v, pt_v) in enumerate(zip(cpp_list, pt_list)):
+        match = math.isclose(cpp_v, pt_v, abs_tol=tol)
         status = "MATCH" if match else "MISMATCH"
         if not match:
-            all_passed = False
-            
-        print(f"{metric:<20} | {cpp_val:<16.4f} | {pt_val:<16.4f} | {status}")
-    return all_passed
-    
+            passed = False
+        print(f"{i:<8} | {cpp_v:<16.6f} | {pt_v:<16.6f} | {status}")
+    return passed
+
 def main():
-    print("running pytorch & autograd-cpp verification...")
+    print("Initializing comprehensive framework cross-verification suite...")
     
     try:
-        cpp = run_autograd_cpp()
-        pt = run_pytorch()
-        
-        cpp_freeze = run_requires_grad_cpp()
-        pt_freeze = run_requires_grad_pytorch()
-        
+        cpp_results = run_autograd_cpp()
+        pt_results = run_pytorch()
     except Exception as e:
-        print(f"[ERROR] execution failed: {e}")
+        print(f"[CRITICAL ERROR] Graph computation execution broken: {e}")
+        import traceback
+        traceback.print_exc()
         return
-    
-    # print side by side comparison
-    math_mappings = [
-        ("Forward Pass L", cpp["L"], pt["pytorch_L"]),
-        ("Gradient da", cpp["da"], pt["pytorch_da"]),
-        ("Gradient db", cpp["db"], pt["pytorch_db"]),
-        ("Gradient dc", cpp["dc"], pt["pytorch_dc"]),
+
+    # Aggregate metric alignment runs
+    checks = [
+        ("Loss Forward Output Scalar", cpp_results["forward_out"], pt_results["forward_out"]),
+        ("Gradient Matrix dL/dA", cpp_results["grad_A"], pt_results["grad_A"]),
+        ("Gradient Matrix dL/dB", cpp_results["grad_B"], pt_results["grad_B"]),
+        ("Gradient Vector dL/dC", cpp_results["grad_C"], pt_results["grad_C"]),
     ]
     
-    freeze_mappings = [
-        ("Mixed Pass Loss", cpp_freeze["Loss"], pt_freeze["pytorch_Loss"]),
-        ("Tracking Node da", cpp_freeze["da"], pt_freeze["pytorch_da"]),
-        ("Frozen Node db", cpp_freeze["db"], pt_freeze["pytorch_db"]),
-    ]
-    
-    math_success = print_table("core math graphs", math_mappings)
-    freeze_success = print_table("graphs freezing", freeze_mappings)
-    
-    if math_success and freeze_success:
-        print("[SUCCESS] the autograd c++ engine matches pytorch!1!!")
+    global_success = True
+    for title, cpp_arr, pt_arr in checks:
+        if not verify_and_print(title, cpp_arr, pt_arr):
+            global_success = False
+            
+    print("\n" + "=" * 60)
+    if global_success:
+        print("[SUCCESS] All multi-dimensional math, layout views, and activations match PyTorch perfectly!")
     else:
-        print("[ERROR] gradient mismatched")
-    
+        print("[FAILURE] Gradient misalignment detected between the autograd representations.")
+    print("=" * 60)
+
 if __name__ == '__main__':
     main()
-    

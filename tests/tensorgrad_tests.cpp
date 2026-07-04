@@ -272,6 +272,38 @@ int main() {
     assert(close_enough((*r_tensor->grad)[3], 0.0));
     std::cout << "[PASS] dimensional reductions, keepdim broadcasting, and autograd routing verified\n";
 
+    // test 15: checking tensor shape manipulations (reshape, squeeze, unsqueeze, permute)
+    std::vector<double> sm_vals = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+    auto sm_tensor = std::make_shared<Tensor>(sm_vals, std::vector<size_t>{2, 3}, true);
+
+    // test reshape layout alignment properties
+    auto reshaped = sm_tensor->reshape({3, 2});
+    assert(reshaped->shape[0] == 3 && reshaped->shape[1] == 2);
+    assert(reshaped->strides[0] == 2 && reshaped->strides[1] == 1);
+
+    // test unsqueeze axis padding extension
+    auto unsqueezed = reshaped->unsqueeze(1); // shape shifts from {3, 2} to {3, 1, 2}
+    assert(unsqueezed->shape.size() == 3);
+    assert(unsqueezed->shape[0] == 3 && unsqueezed->shape[1] == 1 && unsqueezed->shape[2] == 2);
+    assert(unsqueezed->strides[0] == 2 && unsqueezed->strides[1] == 2 && unsqueezed->strides[2] == 1);
+
+    // test squeeze axis elimination recovery
+    auto squeezed = unsqueezed->squeeze(1); // shape shifts back from {3, 1, 2} to {3, 2}
+    assert(squeezed->shape.size() == 2);
+    assert(squeezed->shape[0] == 3 && squeezed->shape[1] == 2);
+    assert(squeezed->strides[0] == 2 && squeezed->strides[1] == 1);
+
+    // test complex high-rank axis permute routing
+    auto permuted = squeezed->permute({1, 0}); // shape shifts from {3, 2} to {2, 3} (matrix transpose)
+    assert(permuted->shape[0] == 2 && permuted->shape[1] == 3);
+    assert(permuted->strides[0] == 1 && permuted->strides[1] == 2); // verifies stride inversion layout
+    
+    // validate coordinate indexing tracking sanity over the permuted view block
+    // logical coordinate {1, 0} on a transposed matrix maps to value 2.0
+    size_t flat_view_idx = permuted->get_flat_index({1, 0});
+    assert((*permuted->data)[flat_view_idx] == 2.0);
+    std::cout << "[PASS] shape manipulations (reshape, squeeze, unsqueeze, permute) verified successfully\n";
+
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;
 }
