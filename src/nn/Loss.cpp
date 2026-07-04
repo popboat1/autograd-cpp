@@ -21,21 +21,25 @@ TensorPtr MSELoss::operator()(const TensorPtr& preds, const TensorPtr& targets){
     return sum_tensor * N_tensor;
 }
 
-// will be updated later once softmax has been introduced into tensor class
-// CrossEntropyLoss: softmax + neg-log-likelihood over raw logits
-// TensorPtr CrossEntropyLoss::operator()(const TensorPtr& logits, int target_idx){
-//     if (target_idx < 0 || target_idx >= static_cast<int>(logits->size())) {
-//         throw std::out_of_range("CrossEntropyLoss: target index out of bounds!");
-//     }
-
-//     auto sum_exp = make_val(0.0);
-//     for (const auto& logit : logits) {
-//         sum_exp = sum_exp + logit->exp();
-//     }
-
-//     // LogSumExp(logits) - logit[target]
-//     // mathematically identical to -log(exp(logit_target) / sum(exp(logits)))
-//     ValuePtr loss = sum_exp->log() - logits[target_idx];
+// crossentropyloss
+TensorPtr CrossEntropyLoss::operator()(const TensorPtr& logits, const TensorPtr& targets){
+    if (logits->shape != targets->shape) {
+        throw std::invalid_argument("CrossEntropyLoss: logits and one-hot targets must have same dimensions!");
+    }
     
-//     return loss;
-// }
+    auto max_logits = logits->max(1, true);                // extract maximum logits along class dim (axis 1)
+    auto shifted_logits = logits - max_logits;             // compute shifted logits to prevent exponent overflow
+    auto exp_logits = shifted_logits->exp();               // exponentiate shifted logits
+    auto sum_exp = exp_logits->sum(1, true);               // sum exponents along the class dimension
+    auto log_sum_exp = sum_exp->log();                     // compute the logarithm of the sum of exponents
+    auto lse = log_sum_exp + max_logits;                   // complete LogSumExp restoration
+    auto target_logits = (logits * targets)->sum(1, true); // extract target logits via element-wise multiplication with one-hot targets
+    auto loss_per_sample = lse - target_logits;            // per-sample loss calculation
+
+    // flatten and average the loss across the batch elements
+    auto total_loss = loss_per_sample->sum();
+    double N = static_cast<double>(logits->shape[0]); // normalize by batch size
+    auto N_tensor = std::make_shared<Tensor>(std::vector<double>{1.0 / N}, std::vector<size_t>{1}, false);
+
+    return total_loss * N_tensor;
+}

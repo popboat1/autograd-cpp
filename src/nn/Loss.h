@@ -10,10 +10,10 @@ public:
     TensorPtr operator()(const TensorPtr& preds, const TensorPtr& targets);
 };
 
-// class CrossEntropyLoss {
-// public:
-//     CrossEntropyLoss() = default;
-//     TensorPtr operator()(const TensorPtr& logits, int target_idx);
-// };
+class CrossEntropyLoss {
+public:
+    CrossEntropyLoss() = default;
+    TensorPtr operator()(const TensorPtr& logits, const TensorPtr& targets);
+};
 
 #endif
