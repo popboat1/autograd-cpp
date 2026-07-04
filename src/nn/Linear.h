@@ -5,7 +5,7 @@
 
 class Linear : public Module {
 public:
-    Linear(int fan_in, int fan_out, int seed=42); // init weights and biases randomly based on in/out size
+    Linear(int fan_in, int fan_out, const std::string& init_type = "kaiming"); // init weights and biases randomly based on in/out size
 
     // forward pass
     TensorPtr forward(const TensorPtr& xin);

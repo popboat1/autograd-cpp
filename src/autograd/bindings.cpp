@@ -5,11 +5,17 @@
 #include "nn/MLP.h"
 #include "optim/SGD.h"
 #include "nn/Loss.h"
+#include "utils/RNG.h"
 
 namespace py = pybind11;
 
 PYBIND11_MODULE(autograd_cpp, m) {
     m.doc() = "C++ ML Framework Python Bindings (Tensor Engine)";
+
+    // ----------------------------------------------------
+    // GLOBAL UTILITIES & STOCHASTICITY
+    // ----------------------------------------------------
+    m.def("manual_seed", &RNG::manual_seed, py::arg("seed"), "Set global framework seed");
 
     // ----------------------------------------------------
     // TENSOR BINDINGS
@@ -63,16 +69,16 @@ PYBIND11_MODULE(autograd_cpp, m) {
     // NEURAL NETWORK BINDINGS
     // ----------------------------------------------------
     py::class_<Linear>(m, "Linear")
-        .def(py::init<int, int, int>(), py::arg("fan_in"), py::arg("fan_out"), py::arg("seed") = 42)
+        .def(py::init<int, int, const std::string&>(), 
+             py::arg("fan_in"), py::arg("fan_out"), py::arg("init_type") = "kaiming")
         .def("forward", &Linear::forward)
         .def("parameters", &Linear::parameters);
 
     py::class_<MLP>(m, "MLP")
-        .def(py::init<int, std::vector<int>, std::string, int>(), 
+        .def(py::init<int, std::vector<int>, std::string>(), 
              py::arg("fan_in"), 
              py::arg("hidden_sizes"), 
-             py::arg("activation_layer") = "", 
-             py::arg("seed") = 42)
+             py::arg("activation_layer") = "")
         .def("forward", &MLP::forward)
         .def("parameters", &MLP::parameters);
     

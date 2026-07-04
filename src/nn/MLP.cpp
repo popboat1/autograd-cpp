@@ -2,15 +2,14 @@
 #include <random>
 #include <vector>
 
-MLP::MLP(int fan_in, std::vector<int> hidden_sizes, std::string activation_layer, int seed){
+MLP::MLP(int fan_in, std::vector<int> hidden_sizes, std::string activation_layer){
     this->activation_layer = activation_layer;
     int current_in = fan_in;
     int seed_modifier = 0; // to break symmetry between layers
 
-    for(int& hidden_size : hidden_sizes){
-        layers.emplace_back(current_in, hidden_size, seed + seed_modifier);
-        current_in=hidden_size;
-        ++seed_modifier;
+    for(int hidden_size : hidden_sizes) {
+        layers.emplace_back(current_in, hidden_size, "kaiming");
+        current_in = hidden_size;
     }
 }
 

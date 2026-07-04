@@ -4,10 +4,11 @@
 #include "Module.h"
 #include "Linear.h"
 #include <vector>
+#include <string>
 
 class MLP: public Module {
 public:
-    MLP(int fan_in, std::vector<int> hidden_sizes, std::string activation_layer="", int seed=42
+    MLP(int fan_in, std::vector<int> hidden_sizes, std::string activation_layer=""
     // later down the line...
     // bias, dropout, norm_layer, inplace
     );

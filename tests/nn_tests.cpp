@@ -6,6 +6,7 @@
 #include "nn/MLP.h"
 #include "nn/Loss.h"
 #include "optim/SGD.h"
+#include "utils/RNG.h"
 
 // helper to assert floating point parity
 bool close_enough(double a, double b, double tol = 1e-5) {
@@ -15,6 +16,9 @@ bool close_enough(double a, double b, double tol = 1e-5) {
 int main() {
     std::cout << "starting neural network integration tests\n";
     std::cout << "----------------------------------------\n";
+
+    // set seed
+    RNG::manual_seed(42);
 
     // dataset (batch of 4 samples, 3 features each)
     std::vector<double> X_vals = {
@@ -31,7 +35,7 @@ int main() {
     auto Y = std::make_shared<Tensor>(Y_vals, std::vector<size_t>{4, 1}, false);
 
     // initialize the MLP (3 inputs -> 4 hidden -> 4 hidden -> 1 output)
-    MLP model(3, {4, 4, 1}, "relu", 42);
+    MLP model(3, {4, 4, 1}, "relu");
 
     // initialize the optims
     SGD optimizer(model.parameters(), 0.05); // learning rate = 0.05
