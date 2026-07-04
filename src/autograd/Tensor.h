@@ -113,6 +113,12 @@ public:
     TensorPtr argmax(size_t dim, bool keepdim = false);
     TensorPtr argmin(size_t dim, bool keepdim = false);
 
+    // tensor shape manipulation ops
+    TensorPtr reshape(const std::vector<size_t>& new_shape);
+    TensorPtr squeeze(size_t dim);
+    TensorPtr unsqueeze(size_t dim);
+    TensorPtr permute(const std::vector<size_t>& dims);
+
     // reshapes tensor view without memory copies; accepts a single -1 placeholder axis
     TensorPtr view(const std::vector<int>& target_shape);
 

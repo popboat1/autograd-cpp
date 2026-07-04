@@ -46,6 +46,12 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("argmax", &Tensor::argmax, py::arg("dim"), py::arg("keepdim") = false)
         .def("transpose", &Tensor::transpose, py::arg("dim0"), py::arg("dim1"))
         .def("view", &Tensor::view, py::arg("target_shape"))
+
+        // shape manipulation additions
+        .def("reshape", &Tensor::reshape, py::arg("new_shape"))
+        .def("squeeze", &Tensor::squeeze, py::arg("dim"))
+        .def("unsqueeze", &Tensor::unsqueeze, py::arg("dim"))
+        .def("permute", &Tensor::permute, py::arg("dims"))
         
         // math/activations
         .def("pow", &Tensor::pow)

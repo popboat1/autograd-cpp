@@ -1360,6 +1360,128 @@ TensorPtr Tensor::argmin(size_t dim, bool keepdim) {
     return out;
 }
 
+// tensor.reshape(), reshapes tensor dims while preserving element layout sequence
+TensorPtr Tensor::reshape(const std::vector<size_t>& new_shape){
+    // force contiguity if layout is non-contiguous
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
+
+    size_t old_elements = 1;
+    for (size_t s : active_this->shape) old_elements *= s;
+
+    size_t new_elements = 1;
+    for (size_t s: new_shape) new_elements *= s;
+
+    if(old_elements != new_elements){
+        throw std::invalid_argument("reshape: total number of elements must match original shape capacity");
+    }
+
+    // compute standard contiguous row-major strides for the new shape
+    std::vector<size_t> new_strides(new_shape.size(), 1);
+    if (!new_shape.empty()) {
+        for (int i = static_cast<int>(new_shape.size()) - 2; i >= 0; --i) {
+            new_strides[i] = new_strides[i + 1] * new_shape[i + 1];
+        }
+    }
+
+    if (active_this->requires_grad) {
+        active_this->ensure_grad_allocated();
+    }
+
+    auto out = std::make_shared<Tensor>(active_this->data, active_this->grad, new_shape, std::vector<TensorPtr>{active_this}, "reshape");
+    out->strides = new_strides;
+    return out;
+}
+
+// tensor.squeeze(), drops a dimension of size 1 at the specified index axis
+TensorPtr Tensor::squeeze(size_t dim){
+    if (dim >= shape.size()) {
+        throw std::out_of_range("squeeze: dimension index out of bounds");
+    }
+
+    // if the dimension is not 1, squeezing acts as a safe no-op view
+    if (shape[dim] != 1) {
+        return shared_from_this();
+    }
+
+    std::vector<size_t> new_shape = shape;
+    std::vector<size_t> new_strides = strides;
+
+    new_shape.erase(new_shape.begin() + dim);
+    new_strides.erase(new_strides.begin() + dim);
+
+    if (this->requires_grad) {
+        this->ensure_grad_allocated();
+    }
+
+    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "squeeze");
+    out->strides = new_strides;
+    return out;
+}
+
+// tensor.unsqueeze(), inserts a new dimension of size 1 at the specified index axis
+TensorPtr Tensor::unsqueeze(size_t dim) {
+    if (dim > shape.size()) {
+        throw std::out_of_range("unsqueeze: dimension index out of bounds");
+    }
+
+    std::vector<size_t> new_shape = shape;
+    std::vector<size_t> new_strides = strides;
+
+    new_shape.insert(new_shape.begin() + dim, 1);
+    
+    // inject layout-safe stride alignment matching the adjacent memory block jumps
+    if (dim >= strides.size()) {
+        new_strides.push_back(1);
+    } else {
+        new_strides.insert(new_strides.begin() + dim, strides[dim] * shape[dim]);
+    }
+
+    if (this->requires_grad) {
+        this->ensure_grad_allocated();
+    }
+
+    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "unsqueeze");
+    out->strides = new_strides;
+    return out;
+}
+
+// tensor.permute(), reorders layout dimensions based on an arbitrary axis permutation sequence
+TensorPtr Tensor::permute(const std::vector<size_t>& dims) {
+    if (dims.size() != shape.size()) {
+        throw std::invalid_argument("permute: permutation vector must match tensor rank size");
+    }
+
+    // validate completeness of dimension indexes to prevent axis duplication/omission
+    std::vector<bool> seen(shape.size(), false);
+    for (size_t d : dims) {
+        if (d >= shape.size()) {
+            throw std::out_of_range("permute: axis index out of bounds");
+        }
+        if (seen[d]) {
+            throw std::invalid_argument("permute: duplicate axis entries detected");
+        }
+        seen[d] = true;
+    }
+
+    std::vector<size_t> new_shape(shape.size());
+    std::vector<size_t> new_strides(shape.size());
+
+    // map the shape and stride layouts directly onto the new target positions
+    for (size_t i = 0; i < dims.size(); ++i) {
+        new_shape[i] = shape[dims[i]];
+        new_strides[i] = strides[dims[i]];
+    }
+
+    if (this->requires_grad) {
+        this->ensure_grad_allocated();
+    }
+
+    // permute creates a non-contiguous structural view node
+    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "permute");
+    out->strides = new_strides;
+    return out;
+}
+
 // backward pass function
 void Tensor::backward() {
     // build topological sort list
