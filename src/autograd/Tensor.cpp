@@ -762,8 +762,21 @@ TensorPtr Tensor::sum(size_t dim, bool keepdim){
             double sum = 0.0;
 
             for(size_t r {0}; r < meta.reduced_size; ++r){
-                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+                std::vector<size_t> coords(shape.size());
+                coords[dim] = r;
 
+                size_t temp_inner = inner;
+                for (size_t d = shape.size() - 1; d > dim; --d) {
+                    coords[d] = temp_inner % shape[d];
+                    temp_inner /= shape[d];
+                }
+                size_t temp_outer = outer;
+                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                    coords[d] = temp_outer % shape[d];
+                    temp_outer /= shape[d];
+                }
+
+                size_t self_flat = get_flat_index(coords);
                 sum += (*data)[self_flat];
             }
 
@@ -781,7 +794,7 @@ TensorPtr Tensor::sum(size_t dim, bool keepdim){
     size_t inner_bs = meta.inner_block_size;
     size_t r_size = meta.reduced_size;
 
-    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size](){
+    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size, dim](){
         if(auto out_ptr = weak_out.lock()){
 
             for (size_t outer {0}; outer < outer_bs; ++outer) {
@@ -791,7 +804,21 @@ TensorPtr Tensor::sum(size_t dim, bool keepdim){
 
                     if(self->requires_grad){
                         for (size_t r {0}; r < r_size; ++r) {
-                            size_t self_flat = outer * (r_size * inner_bs) + r * inner_bs + inner;
+                            std::vector<size_t> back_coords(self->shape.size());
+                            back_coords[dim] = r;
+                            
+                            size_t temp_inner = inner;
+                            for (size_t d = self->shape.size() - 1; d > dim; --d) {
+                                back_coords[d] = temp_inner % self->shape[d];
+                                temp_inner /= self->shape[d];
+                            }
+                            size_t temp_outer = outer;
+                            for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                                back_coords[d] = temp_outer % self->shape[d];
+                                temp_outer /= self->shape[d];
+                            }
+
+                            size_t self_flat = self->get_flat_index(back_coords);
                             (*self->grad)[self_flat] += upstream_grad;
                         }
                     }
@@ -1044,8 +1071,21 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
             double sum = 0.0;
 
             for(size_t r {0}; r < meta.reduced_size; ++r){
-                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+                std::vector<size_t> coords(shape.size());
+                coords[dim] = r;
 
+                size_t temp_inner = inner;
+                for (size_t d = shape.size() - 1; d > dim; --d) {
+                    coords[d] = temp_inner % shape[d];
+                    temp_inner /= shape[d];
+                }
+                size_t temp_outer = outer;
+                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                    coords[d] = temp_outer % shape[d];
+                    temp_outer /= shape[d];
+                }
+
+                size_t self_flat = get_flat_index(coords);
                 sum += (*data)[self_flat];
             }
 
@@ -1063,7 +1103,7 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
     size_t inner_bs = meta.inner_block_size;
     size_t r_size = meta.reduced_size;
 
-    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size](){
+    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size, dim](){
         if(auto out_ptr = weak_out.lock()){
             // derivative of a mean is just 1/N
             double grad_scale = 1.0 / static_cast<double>(r_size);
@@ -1078,7 +1118,21 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
                     // distribute it equally to all elements that formed the mean
                     if(self->requires_grad){
                         for (size_t r {0}; r < r_size; ++r) {
-                            size_t self_flat = outer * (r_size * inner_bs) + r * inner_bs + inner;
+                            std::vector<size_t> back_coords(self->shape.size());
+                            back_coords[dim] = r;
+                            
+                            size_t temp_inner = inner;
+                            for (size_t d = self->shape.size() - 1; d > dim; --d) {
+                                back_coords[d] = temp_inner % self->shape[d];
+                                temp_inner /= self->shape[d];
+                            }
+                            size_t temp_outer = outer;
+                            for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                                back_coords[d] = temp_outer % self->shape[d];
+                                temp_outer /= self->shape[d];
+                            }
+
+                            size_t self_flat = self->get_flat_index(back_coords);
                             (*self->grad)[self_flat] += upstream_grad;
                         }
                     }
@@ -1093,9 +1147,7 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
 // tensor->max() function
 TensorPtr Tensor::max(size_t dim, bool keepdim){
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
-
     std::vector<double> out_vals(meta.total_out_elements, 0.0);
-
     auto max_indices = std::make_shared<std::vector<size_t>>(meta.total_out_elements, 0); // required for backward pass
 
     // forward pass
@@ -1107,14 +1159,26 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
             size_t best_flat_idx = 0;
 
             for(size_t r {0}; r < meta.reduced_size; ++r){
-                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+                std::vector<size_t> coords(shape.size());
+                coords[dim] = r;
+                
+                size_t temp_inner = inner;
+                for (size_t d = shape.size() - 1; d > dim; --d) {
+                    coords[d] = temp_inner % shape[d];
+                    temp_inner /= shape[d];
+                }
+                size_t temp_outer = outer;
+                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                    coords[d] = temp_outer % shape[d];
+                    temp_outer /= shape[d];
+                }
 
+                size_t self_flat = get_flat_index(coords);
                 if ((*data)[self_flat] > current_max) {
                     current_max = (*data)[self_flat];
                     best_flat_idx = self_flat;
                 }
             }
-
             out_vals[out_flat] = current_max;
             (*max_indices)[out_flat] = best_flat_idx;
         }
@@ -1159,14 +1223,26 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
             size_t best_flat_idx = 0;
 
             for(size_t r {0}; r < meta.reduced_size; ++r){
-                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+                std::vector<size_t> coords(shape.size());
+                coords[dim] = r;
+                
+                size_t temp_inner = inner;
+                for (size_t d = shape.size() - 1; d > dim; --d) {
+                    coords[d] = temp_inner % shape[d];
+                    temp_inner /= shape[d];
+                }
+                size_t temp_outer = outer;
+                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                    coords[d] = temp_outer % shape[d];
+                    temp_outer /= shape[d];
+                }
 
+                size_t self_flat = get_flat_index(coords);
                 if ((*data)[self_flat] < current_min) {
                     current_min = (*data)[self_flat];
                     best_flat_idx = self_flat;
                 }
             }
-
             out_vals[out_flat] = current_min;
             (*min_indices)[out_flat] = best_flat_idx;
         }
@@ -1197,26 +1273,36 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
 // tensor->argmax() function
 TensorPtr Tensor::argmax(size_t dim, bool keepdim) {
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
-
     std::vector<double> out_vals(meta.total_out_elements, 0.0);
 
     // forward pass
     for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
         for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
             size_t out_flat = outer * meta.inner_block_size + inner;
-
             double current_max = -INFINITY;
             size_t best_r = 0; // Track the relative index 'r'
 
             for (size_t r {0}; r < meta.reduced_size; ++r) {
-                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+                std::vector<size_t> coords(shape.size());
+                coords[dim] = r;
+                
+                size_t temp_inner = inner;
+                for (size_t d = shape.size() - 1; d > dim; --d) {
+                    coords[d] = temp_inner % shape[d];
+                    temp_inner /= shape[d];
+                }
+                size_t temp_outer = outer;
+                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                    coords[d] = temp_outer % shape[d];
+                    temp_outer /= shape[d];
+                }
 
+                size_t self_flat = get_flat_index(coords);
                 if ((*data)[self_flat] > current_max) {
                     current_max = (*data)[self_flat];
                     best_r = r;
                 }
             }
-
             // Output the index (cast to double), not the value
             out_vals[out_flat] = static_cast<double>(best_r);
         }
@@ -1239,19 +1325,30 @@ TensorPtr Tensor::argmin(size_t dim, bool keepdim) {
     for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
         for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
             size_t out_flat = outer * meta.inner_block_size + inner;
-
             double current_min = INFINITY;
             size_t best_r = 0; // Track the relative index 'r'
 
             for (size_t r {0}; r < meta.reduced_size; ++r) {
-                size_t self_flat = outer * (meta.reduced_size * meta.inner_block_size) + r * meta.inner_block_size + inner;
+                std::vector<size_t> coords(shape.size());
+                coords[dim] = r;
+                
+                size_t temp_inner = inner;
+                for (size_t d = shape.size() - 1; d > dim; --d) {
+                    coords[d] = temp_inner % shape[d];
+                    temp_inner /= shape[d];
+                }
+                size_t temp_outer = outer;
+                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                    coords[d] = temp_outer % shape[d];
+                    temp_outer /= shape[d];
+                }
 
+                size_t self_flat = get_flat_index(coords);
                 if ((*data)[self_flat] < current_min) {
                     current_min = (*data)[self_flat];
                     best_r = r;
                 }
             }
-
             // Output the index (cast to double), not the value
             out_vals[out_flat] = static_cast<double>(best_r);
         }
