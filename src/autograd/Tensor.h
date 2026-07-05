@@ -98,6 +98,11 @@ public:
     friend TensorPtr operator<(const Tensor& lhs, const Tensor& rhs);
     friend TensorPtr operator>(const Tensor& lhs, const Tensor& rhs);
 
+    // unary ops
+    TensorPtr sqrt();
+    TensorPtr neg();
+    friend TensorPtr operator-(const TensorPtr& tensor); // prefix negation
+
     // tensor * scalar multiplications
     friend TensorPtr operator*(const TensorPtr& lhs, double rhs);
     friend TensorPtr operator*(double lhs, const TensorPtr& rhs);

@@ -71,6 +71,11 @@ PYBIND11_MODULE(autograd_cpp, m) {
         
         // map matmul to @ operator
         .def("__matmul__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return Tensor::matmul(lhs, rhs); })
+        
+        // unary ops
+        .def("sqrt", &Tensor::sqrt)
+        .def("neg", &Tensor::neg)
+        .def("__neg__", [](const TensorPtr& self) { return -self; })
 
         // comparison Operator Bindings
         .def("__eq__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return *lhs == *rhs; })

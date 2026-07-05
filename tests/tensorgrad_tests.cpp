@@ -327,6 +327,30 @@ int main() {
     assert(close_enough((*gt_out->data)[3], 1.0)); // 8.0 > 5.0 -> true
     std::cout << "[PASS] element-wise tensor comparisons (==, <, >) and broadcast assertions verified\n";
 
+    // test 17: checking advanced unary operations (sqrt, neg, and operator-) with autograd tracking
+    auto unary_base = std::make_shared<Tensor>(std::vector<double>{4.0, 16.0}, std::vector<size_t>{2}, true);
+
+    // test Square Root
+    auto sqrt_out = unary_base->sqrt();
+    assert(close_enough((*sqrt_out->data)[0], 2.0));
+    assert(close_enough((*sqrt_out->data)[1], 4.0));
+
+    // test Prefix Negation
+    auto neg_out = -unary_base;
+    assert(close_enough((*neg_out->data)[0], -4.0));
+    assert(close_enough((*neg_out->data)[1], -16.0));
+
+    // verify backpropagation derivatives
+    sqrt_out->backward(); // d(sqrt(x))/dx = 0.5 / sqrt(x)
+    assert(close_enough((*unary_base->grad)[0], 0.25)); // 0.5 / 2.0 -> 0.25
+    assert(close_enough((*unary_base->grad)[1], 0.125)); // 0.5 / 4.0 -> 0.125
+
+    unary_base->zero_grad();
+    neg_out->backward();
+    assert(close_enough((*unary_base->grad)[0], -1.0));
+    assert(close_enough((*unary_base->grad)[1], -1.0));
+    std::cout << "[PASS] advanced unary operations (sqrt, neg) and reverse backpropagation verified\n";
+
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;
 }

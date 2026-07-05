@@ -1566,6 +1566,88 @@ TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
     return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, ">");
 }
 
+TensorPtr Tensor::sqrt(){
+    std::vector<double> out_vals(data->size());
+    std::vector<size_t> coords(shape.size(), 0);
+
+    // forward pass
+    for (size_t i = 0; i < data->size(); ++i) {
+        size_t flat_idx = get_flat_index(coords);
+        if ((*data)[flat_idx] < 0.0) {
+            throw std::runtime_error("sqrt: cannot calculate square root of a negative value");
+        }
+        out_vals[i] = std::sqrt((*data)[flat_idx]);
+        advance_coordinates(coords, shape);
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "sqrt");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+
+    out->backward_func = [self, weak_out]() {
+        if (auto out_ptr = weak_out.lock()) {
+            if (self->requires_grad) {
+                std::vector<size_t> back_coords(self->shape.size(), 0);
+                for (size_t i = 0; i < self->data->size(); ++i) {
+                    size_t flat_idx = self->get_flat_index(back_coords);
+                    
+                    // derivative of sqrt(x) is 0.5 / sqrt(x)
+                    double local_derivative = 0.5 / (*out_ptr->data)[i];
+                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
+                    
+                    advance_coordinates(back_coords, self->shape);
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+// element-wise negation
+TensorPtr Tensor::neg(){    
+    std::vector<double> out_vals(data->size());
+    std::vector<size_t> coords(shape.size(), 0);
+
+    // forward pass
+    for (size_t i = 0; i < data->size(); ++i) {
+        size_t flat_idx = get_flat_index(coords);
+        out_vals[i] = -(*data)[flat_idx];
+        advance_coordinates(coords, shape);
+    }
+
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "neg");
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+
+    out->backward_func = [self, weak_out]() {
+        if (auto out_ptr = weak_out.lock()) {
+            if (self->requires_grad) {
+                std::vector<size_t> back_coords(self->shape.size(), 0);
+                for (size_t i = 0; i < self->data->size(); ++i) {
+                    size_t flat_idx = self->get_flat_index(back_coords);
+                    
+                    // derivative of -x is -1.0
+                    (*self->grad)[flat_idx] -= (*out_ptr->grad)[i];
+                    
+                    advance_coordinates(back_coords, self->shape);
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+// unary prefix negation operator routing
+TensorPtr operator-(const TensorPtr& tensor) {
+    return tensor->neg();
+}
+
 // backward pass function
 void Tensor::backward() {
     // build topological sort list
