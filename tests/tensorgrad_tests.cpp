@@ -304,6 +304,29 @@ int main() {
     assert((*permuted->data)[flat_view_idx] == 2.0);
     std::cout << "[PASS] shape manipulations (reshape, squeeze, unsqueeze, permute) verified successfully\n";
 
+    // test 16: checking element-wise tensor comparison matrices (==, <, >) with broadcasting
+    auto comp_lhs = std::make_shared<Tensor>(std::vector<double>{1.0, 5.0, 3.0, 8.0}, std::vector<size_t>{2, 2}, true);
+    auto comp_rhs = std::make_shared<Tensor>(std::vector<double>{2.0, 5.0}, std::vector<size_t>{1, 2}, true); // Broadcasts down row 1
+
+    // test operator==
+    auto eq_out = *comp_lhs == *comp_rhs;
+    assert(eq_out->requires_grad == false); // Enforces absolute non-differentiable tracking state
+    assert(close_enough((*eq_out->data)[0], 0.0)); // 1.0 == 2.0 -> false
+    assert(close_enough((*eq_out->data)[1], 1.0)); // 5.0 == 5.0 -> true
+    assert(close_enough((*eq_out->data)[2], 0.0)); // 3.0 == 2.0 -> false
+    assert(close_enough((*eq_out->data)[3], 0.0)); // 8.0 == 5.0 -> false
+
+    // test operator<
+    auto lt_out = *comp_lhs < *comp_rhs;
+    assert(close_enough((*lt_out->data)[0], 1.0)); // 1.0 < 2.0 -> true
+    assert(close_enough((*lt_out->data)[1], 0.0)); // 5.0 < 5.0 -> false
+
+    // test operator>
+    auto gt_out = *comp_lhs > *comp_rhs;
+    assert(close_enough((*gt_out->data)[2], 1.0)); // 3.0 > 2.0 -> true
+    assert(close_enough((*gt_out->data)[3], 1.0)); // 8.0 > 5.0 -> true
+    std::cout << "[PASS] element-wise tensor comparisons (==, <, >) and broadcast assertions verified\n";
+
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;
 }

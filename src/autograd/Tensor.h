@@ -93,6 +93,11 @@ public:
     TensorPtr transpose(size_t dim0, size_t dim1);
     TensorPtr sum();
 
+    // tensor comparison operators
+    friend TensorPtr operator==(const Tensor& lhs, const Tensor& rhs);
+    friend TensorPtr operator<(const Tensor& lhs, const Tensor& rhs);
+    friend TensorPtr operator>(const Tensor& lhs, const Tensor& rhs);
+
     // tensor * scalar multiplications
     friend TensorPtr operator*(const TensorPtr& lhs, double rhs);
     friend TensorPtr operator*(double lhs, const TensorPtr& rhs);

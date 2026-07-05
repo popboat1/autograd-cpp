@@ -1482,6 +1482,90 @@ TensorPtr Tensor::permute(const std::vector<size_t>& dims) {
     return out;
 }
 
+// equals to comparison
+TensorPtr operator==(const Tensor& lhs, const Tensor& rhs) {
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+    
+    auto lhs_ptr = std::make_shared<Tensor>(*lhs.data, lhs.shape, false);
+    auto rhs_ptr = std::make_shared<Tensor>(*rhs.data, rhs.shape, false);
+    lhs_ptr->strides = lhs.strides;
+    rhs_ptr->strides = rhs.strides;
+    
+    Tensor::compute_broadcast_metadata(lhs_ptr, rhs_ptr, out_shape, lhs_b_strides, rhs_b_strides);
+
+    size_t total_elements = 1;
+    for (size_t dim : out_shape) total_elements *= dim;
+    std::vector<double> out_values(total_elements);
+
+    std::vector<size_t> current_idx(out_shape.size(), 0);
+    for (size_t i = 0; i < total_elements; ++i) {
+        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
+        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+        out_values[i] = ((*lhs.data)[flat_lhs] == (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+        Tensor::advance_coordinates(current_idx, out_shape);
+    }
+
+    return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, "==");
+}
+
+// less than comparison
+TensorPtr operator<(const Tensor& lhs, const Tensor& rhs) {
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+    
+    auto lhs_ptr = std::make_shared<Tensor>(*lhs.data, lhs.shape, false);
+    auto rhs_ptr = std::make_shared<Tensor>(*rhs.data, rhs.shape, false);
+    lhs_ptr->strides = lhs.strides;
+    rhs_ptr->strides = rhs.strides;
+    
+    Tensor::compute_broadcast_metadata(lhs_ptr, rhs_ptr, out_shape, lhs_b_strides, rhs_b_strides);
+
+    size_t total_elements = 1;
+    for (size_t dim : out_shape) total_elements *= dim;
+    std::vector<double> out_values(total_elements);
+
+    std::vector<size_t> current_idx(out_shape.size(), 0);
+    for (size_t i = 0; i < total_elements; ++i) {
+        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
+        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+        out_values[i] = ((*lhs.data)[flat_lhs] < (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+        Tensor::advance_coordinates(current_idx, out_shape);
+    }
+
+    return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, "<");
+}
+
+// greater than comparison
+TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+    
+    auto lhs_ptr = std::make_shared<Tensor>(*lhs.data, lhs.shape, false);
+    auto rhs_ptr = std::make_shared<Tensor>(*rhs.data, rhs.shape, false);
+    lhs_ptr->strides = lhs.strides;
+    rhs_ptr->strides = rhs.strides;
+    
+    Tensor::compute_broadcast_metadata(lhs_ptr, rhs_ptr, out_shape, lhs_b_strides, rhs_b_strides);
+
+    size_t total_elements = 1;
+    for (size_t dim : out_shape) total_elements *= dim;
+    std::vector<double> out_values(total_elements);
+
+    std::vector<size_t> current_idx(out_shape.size(), 0);
+    for (size_t i = 0; i < total_elements; ++i) {
+        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
+        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+        out_values[i] = ((*lhs.data)[flat_lhs] > (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+        Tensor::advance_coordinates(current_idx, out_shape);
+    }
+
+    return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, ">");
+}
+
 // backward pass function
 void Tensor::backward() {
     // build topological sort list

@@ -1,5 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/operators.h>
 #include "autograd/Tensor.h"
 #include "nn/Linear.h"
 #include "nn/MLP.h"
@@ -69,7 +70,12 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("__truediv__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return lhs / rhs; })
         
         // map matmul to @ operator
-        .def("__matmul__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return Tensor::matmul(lhs, rhs); });
+        .def("__matmul__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return Tensor::matmul(lhs, rhs); })
+
+        // comparison Operator Bindings
+        .def("__eq__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return *lhs == *rhs; })
+        .def("__lt__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return *lhs < *rhs; })
+        .def("__gt__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return *lhs > *rhs; });
     
     // ----------------------------------------------------
     // NEURAL NETWORK BINDINGS
