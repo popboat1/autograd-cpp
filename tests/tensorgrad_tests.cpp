@@ -351,6 +351,73 @@ int main() {
     assert(close_enough((*unary_base->grad)[1], -1.0));
     std::cout << "[PASS] advanced unary operations (sqrt, neg) and reverse backpropagation verified\n";
 
+    // test 18: checking tensor view expansion (expand) and broadcast gradient reduction passes
+    std::vector<double> exp_vals = {2.0, 4.0}; 
+    auto exp_base = std::make_shared<Tensor>(exp_vals, std::vector<size_t>{2, 1}, true); // Shape (2, 1)
+
+    // expand singleton dimension 1 from size 1 to size 3 -> logical shape becomes (2, 3)
+    auto expanded_tensor = exp_base->expand({2, 3});
+    assert(expanded_tensor->shape[0] == 2 && expanded_tensor->shape[1] == 3);
+    assert(expanded_tensor->strides[0] == 1 && expanded_tensor->strides[1] == 0); // Stride 0 confirms zero-copy trick
+
+    // verify zero-copy layout access mapping
+    assert(close_enough((*expanded_tensor->data)[expanded_tensor->get_flat_index({0, 0})], 2.0));
+    assert(close_enough((*expanded_tensor->data)[expanded_tensor->get_flat_index({0, 1})], 2.0)); // Broadcasted element
+    assert(close_enough((*expanded_tensor->data)[expanded_tensor->get_flat_index({0, 2})], 2.0)); // Broadcasted element
+    assert(close_enough((*expanded_tensor->data)[expanded_tensor->get_flat_index({1, 2})], 4.0)); // Second row stretch
+
+    // simulate an upstream gradient matrix injection of 1.0s across all elements
+    std::fill(expanded_tensor->grad->begin(), expanded_tensor->grad->end(), 1.0);
+
+    // trigger backward pass to verify reduction summation routing
+    expanded_tensor->backward_func(); 
+    // each row of size 3 collapse back into its original size 1 singleton location -> total gradient = 3.0 per row
+    assert(close_enough((*exp_base->grad)[0], 3.0));
+    assert(close_enough((*exp_base->grad)[1], 3.0));
+    std::cout << "[PASS] tensor view expand forward structures and backward reduction tracking verified\n";
+
+    // test 19: verifying tensor argsort utility along a target dimension
+    std::vector<double> sort_vals = {3.0, 1.0, 2.0, 6.0, 5.0, 4.0};
+    auto sort_tensor = std::make_shared<Tensor>(sort_vals, std::vector<size_t>{2, 3}, false);
+
+    // sort along dimension 1 (rows), ascending
+    auto argsort_out = sort_tensor->argsort(1, false);
+    assert(argsort_out->shape[0] == 2 && argsort_out->shape[1] == 3);
+    assert(argsort_out->requires_grad == false);
+
+    // row 0: [3, 1, 2] -> sorted indices should be [1, 2, 0]
+    assert(close_enough((*argsort_out->data)[0], 1.0));
+    assert(close_enough((*argsort_out->data)[1], 2.0));
+    assert(close_enough((*argsort_out->data)[2], 0.0));
+
+    // row 1: [6, 5, 4] -> sorted indices should be [2, 1, 0]
+    assert(close_enough((*argsort_out->data)[3], 2.0));
+    assert(close_enough((*argsort_out->data)[4], 1.0));
+    assert(close_enough((*argsort_out->data)[5], 0.0));
+    std::cout << "[PASS] tensor argsort index generation utilities verified successfully\n";
+
+    // test 20: verifying explicit zero_grad operation on intermediate graph nodes
+    auto base_x = std::make_shared<Tensor>(std::vector<double>{2.0}, std::vector<size_t>{1}, true);
+    auto intermediate_y = base_x * base_x; // y = x^2, dy/dx = 2x = 4.0
+    auto final_z = intermediate_y * 3.0;   // z = 3y, dz/dy = 3.0
+
+    // execute first forward/backward pass
+    final_z->backward();
+    assert(close_enough((*intermediate_y->grad)[0], 3.0));
+    assert(close_enough((*base_x->grad)[0], 12.0)); // dz/dx = 3 * 2x = 12.0
+
+    // verify that backward accumulates gradients by default if uncleared
+    final_z->backward();
+    assert(close_enough((*intermediate_y->grad)[0], 6.0));  // 3.0 + 3.0
+    assert(close_enough((*base_x->grad)[0], 24.0));        // 12.0 + 12.0
+
+    // apply explicit zero_grad to clear intermediate accumulation
+    intermediate_y->zero_grad();
+    base_x->zero_grad();
+    assert(close_enough((*intermediate_y->grad)[0], 0.0));
+    assert(close_enough((*base_x->grad)[0], 0.0));
+    std::cout << "[PASS] explicit zero_grad on intermediate nodes verified successfully\n";
+
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;
 }

@@ -1648,6 +1648,144 @@ TensorPtr operator-(const TensorPtr& tensor) {
     return tensor->neg();
 }
 
+// explicitly expands tensor dimensions along singleton axes via zero-copy stride mapping
+TensorPtr Tensor::expand(const std::vector<size_t>& new_shape){
+    size_t old_ndim = shape.size();
+    size_t new_ndim = new_shape.size();
+
+    // validate rank boundary condition
+    if (new_ndim < old_ndim){
+        throw std::invalid_argument("expand: requested shape rank cannot be smaller than current tensor rank");
+    }
+
+    // adapt and left-pad the original shape/strides to match the target rank configuration
+    std::vector<size_t> adjusted_old_shape(new_ndim, 1);
+    std::vector<size_t> adjusted_old_strides(new_ndim, 0);
+    for (size_t i = 0; i < old_ndim; ++i) {
+        adjusted_old_shape[new_ndim - 1 - i] = shape[old_ndim - 1 - i];
+        adjusted_old_strides[new_ndim - 1 - i] = strides[old_ndim - 1 - i];
+    }
+
+    std::vector<size_t> new_strides(new_ndim, 0);
+    size_t total_new_elements = 1;
+    // validate dimension scalability and apply zero-stride assignment
+    for (size_t i = 0; i < new_ndim; ++i) {
+        total_new_elements *= new_shape[i];
+        
+        if (adjusted_old_shape[i] == new_shape[i]) {
+            new_strides[i] = adjusted_old_strides[i];
+        } else if (adjusted_old_shape[i] == 1) {
+            new_strides[i] = 0;
+        } else {
+            throw std::invalid_argument("expand: invalid dimension expansion; can only expand singleton axes of size 1");
+        }
+    }
+
+    if (this->requires_grad) {
+        this->ensure_grad_allocated();
+    }
+
+    // allocate a separate gradient vector for the view node to receive full-sized unreduced gradients
+    auto new_grad = std::make_shared<std::vector<double>>(total_new_elements, 0.0);
+
+    auto out = std::make_shared<Tensor>(this->data, new_grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "expand");
+    out->strides = new_strides;
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = shared_from_this();
+
+    out->backward_func = [self, weak_out, new_shape, total_new_elements]() {
+        if (auto out_ptr = weak_out.lock()) {
+            if (self->requires_grad) {
+                std::vector<size_t> coords(new_shape.size(), 0);
+                size_t rank_diff = new_shape.size() - self->shape.size();
+
+                for (size_t i = 0; i < total_new_elements; ++i) {
+                    double upstream_grad = (*out_ptr->grad)[i];
+
+                    // compress coordinates back down to the parent's original unexpanded footprint shapes
+                    std::vector<size_t> old_coords(self->shape.size());
+                    for (size_t d = 0; d < self->shape.size(); ++d) {
+                        old_coords[d] = (self->shape[d] == 1) ? 0 : coords[d + rank_diff];
+                    }
+
+                    size_t self_flat = self->get_flat_index(old_coords);
+                    (*self->grad)[self_flat] += upstream_grad; // accumulates multiple items back to singleton positions
+
+                    Tensor::advance_coordinates(coords, new_shape);
+                }
+            }
+        }
+    };
+
+    return out;
+}
+
+// argsort along a specific dimension returning sorted index array
+TensorPtr Tensor::argsort(size_t dim, bool descending) {
+    if (dim >= shape.size()) {
+        throw std::invalid_argument("argsort: dimension out of bounds");
+    }
+
+    // calculate block sizes for iteration slices
+    size_t reduced_size = shape[dim];
+    size_t inner_block_size = 1;
+    for (size_t i = dim + 1; i < shape.size(); ++i) {
+        inner_block_size *= shape[i];
+    }
+    size_t total_elements = data->size();
+    size_t outer_block_size = total_elements / (reduced_size * inner_block_size);
+
+    // allocate contiguous output buffer matching original size
+    std::vector<double> out_vals(total_elements);
+
+    // process each sliced block independently
+    for (size_t outer = 0; outer < outer_block_size; ++outer) {
+        for (size_t inner = 0; inner < inner_block_size; ++inner) {
+            
+            // prepare relative index array to sort
+            std::vector<size_t> r_indices(reduced_size);
+            for (size_t r = 0; r < reduced_size; ++r) r_indices[r] = r;
+
+            // helper to resolve exact non-contiguous source index via coordinate mapping
+            auto get_flat_for_r = [&](size_t r) {
+                std::vector<size_t> coords(shape.size());
+                coords[dim] = r;
+                size_t temp_inner = inner;
+                for (size_t d = shape.size() - 1; d > dim; --d) {
+                    coords[d] = temp_inner % shape[d];
+                    temp_inner /= shape[d];
+                }
+                size_t temp_outer = outer;
+                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                    coords[d] = temp_outer % shape[d];
+                    temp_outer /= shape[d];
+                }
+                return get_flat_index(coords);
+            };
+
+            // sort indices based on underlying tensor values
+            std::sort(r_indices.begin(), r_indices.end(), [&](size_t r1, size_t r2) {
+                double v1 = (*data)[get_flat_for_r(r1)];
+                double v2 = (*data)[get_flat_for_r(r2)];
+                return descending ? (v1 > v2) : (v1 < v2);
+            });
+
+            // write sorted index array to output vector positions
+            for (size_t r = 0; r < reduced_size; ++r) {
+                size_t out_flat = outer * (reduced_size * inner_block_size) + r * inner_block_size + inner;
+                out_vals[out_flat] = static_cast<double>(r_indices[r]);
+            }
+        }
+    }
+
+    // return non-differentiable tracking node
+    auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{}, "argsort");
+    out->requires_grad = false;
+    return out;
+}
+
 // backward pass function
 void Tensor::backward() {
     // build topological sort list
@@ -1665,10 +1803,26 @@ void Tensor::backward() {
     };
 
     build_topo(shared_from_this());
-
+    // allocate gradients for all active graph nodes
     for(auto& node : topo){
         if(node->requires_grad == true){
             node->ensure_grad_allocated();
+        }
+    }
+
+    // snapshot historical gradients of intermediate nodes and clear them for this pass.
+    // this ensures downstream layers receive only fresh current-pass updates (matching pytorch),
+    // while allowing intermediate nodes to accumulate their user-facing totals at the end.
+    std::vector<TensorPtr> intermediate_nodes;
+    std::vector<std::vector<double>> old_grads;
+
+    for(auto& node : topo){
+        if(node->requires_grad && !node->prev.empty() && node != shared_from_this()){
+            if(node->grad){
+                intermediate_nodes.push_back(node);
+                old_grads.push_back(*node->grad);
+                std::fill(node->grad->begin(), node->grad->end(), 0.0);
+            }
         }
     }
 
@@ -1680,6 +1834,15 @@ void Tensor::backward() {
     for(auto it = topo.rbegin(); it != topo.rend(); ++it){
         if ((*it)->requires_grad){
             (*it)->backward_func();
+        }
+    }
+
+    // restore and accumulate historical sums back into user-facing intermediate buffers
+    for(size_t k = 0; k < intermediate_nodes.size(); ++k){
+        auto& node = intermediate_nodes[k];
+        const auto& old_vector = old_grads[k];
+        for(size_t i = 0; i < node->grad->size(); ++i){
+            (*node->grad)[i] += old_vector[i];
         }
     }
 }

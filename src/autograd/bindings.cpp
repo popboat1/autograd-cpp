@@ -37,6 +37,7 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def_property_readonly("requires_grad", [](const TensorPtr& self) { return self->requires_grad; })
         
         .def("backward", &Tensor::backward)
+        .def("zero_grad", &Tensor::zero_grad) // allows manual gradient clearing on explicit nodes
         
         // operations
         .def("sum", py::overload_cast<>(&Tensor::sum))
@@ -76,6 +77,10 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("sqrt", &Tensor::sqrt)
         .def("neg", &Tensor::neg)
         .def("__neg__", [](const TensorPtr& self) { return -self; })
+
+        .def("expand", &Tensor::expand, py::arg("new_shape"))
+
+        .def("argsort", &Tensor::argsort, py::arg("dim"), py::arg("descending") = false)
 
         // comparison Operator Bindings
         .def("__eq__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return *lhs == *rhs; })

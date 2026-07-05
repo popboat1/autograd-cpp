@@ -132,6 +132,12 @@ public:
     // reshapes tensor view without memory copies; accepts a single -1 placeholder axis
     TensorPtr view(const std::vector<int>& target_shape);
 
+    // tensor broadcasting expansion view
+    TensorPtr expand(const std::vector<size_t>& new_shape);
+
+    // tensor sorting utilities
+    TensorPtr argsort(size_t dim, bool descending = false);
+
     // prints metadata footprint and formatted multi-dimensional bracket layouts
     void print() const;
 };
