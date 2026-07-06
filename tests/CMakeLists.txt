@@ -2,6 +2,7 @@
 add_executable(tensorgrad_tests
     tensorgrad_tests.cpp
     ${CMAKE_SOURCE_DIR}/src/autograd/Tensor.cpp
+    ${CMAKE_SOURCE_DIR}/src/nn/Loss.cpp
 )
 add_test(NAME TensorGradMatrixTest COMMAND tensorgrad_tests)
 

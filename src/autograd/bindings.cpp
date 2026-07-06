@@ -64,6 +64,10 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("log", &Tensor::log)
         .def("print", &Tensor::print)
 
+        // advanced activations
+        .def("softmax", &Tensor::softmax, py::arg("dim"))
+        .def("log_softmax", &Tensor::log_softmax, py::arg("dim"))
+
         // magic methods
         .def("__add__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return lhs + rhs; })
         .def("__sub__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return lhs - rhs; })
@@ -121,4 +125,12 @@ PYBIND11_MODULE(autograd_cpp, m) {
     py::class_<MSELoss>(m, "MSELoss")
         .def(py::init<>())
         .def("__call__", &MSELoss::operator());
+    
+    py::class_<CrossEntropyLoss>(m, "CrossEntropyLoss")
+        .def(py::init<>())
+        .def("__call__", &CrossEntropyLoss::operator());
+
+    py::class_<SparseCategoricalCrossEntropyLoss>(m, "SparseCategoricalCrossEntropyLoss")
+        .def(py::init<>())
+        .def("__call__", &SparseCategoricalCrossEntropyLoss::operator());
 }

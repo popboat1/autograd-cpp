@@ -16,4 +16,10 @@ public:
     TensorPtr operator()(const TensorPtr& logits, const TensorPtr& targets);
 };
 
+class SparseCategoricalCrossEntropyLoss {
+public:
+    SparseCategoricalCrossEntropyLoss() = default;
+    TensorPtr operator()(const TensorPtr& logits, const TensorPtr& targets);
+};
+
 #endif

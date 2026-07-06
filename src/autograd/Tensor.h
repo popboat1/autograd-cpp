@@ -114,6 +114,10 @@ public:
     TensorPtr sigmoid();
     TensorPtr log();
     TensorPtr pow(double exponent);
+
+    // advanced activations
+    TensorPtr softmax(size_t dim);
+    TensorPtr log_softmax(size_t dim);
     
     // dimensional reduction ops
     TensorPtr sum(size_t dim, bool keepdim = false);

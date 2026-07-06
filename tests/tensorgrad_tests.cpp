@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include "autograd/Tensor.h"
+#include "nn/Loss.h"
 
 // helper to assert floating point parity smoothly
 bool close_enough(double a, double b, double tol = 1e-5) {
@@ -417,6 +418,60 @@ int main() {
     assert(close_enough((*intermediate_y->grad)[0], 0.0));
     assert(close_enough((*base_x->grad)[0], 0.0));
     std::cout << "[PASS] explicit zero_grad on intermediate nodes verified successfully\n";
+
+    // test 21: checking advanced activations (softmax, log_softmax) via composition autograd routing
+    std::vector<double> act_vals = {1.0, 2.0, 3.0, 1.0, 2.0, 3.0};
+    auto act_tensor = std::make_shared<Tensor>(act_vals, std::vector<size_t>{2, 3}, true);
+
+    // compute softmax along row dimension (dim 1)
+    auto sm_res = act_tensor->softmax(1);
+    // analytical softmax values for [1, 2, 3] are approx [0.09003, 0.24472, 0.66524]
+    assert(close_enough((*sm_res->data)[0], 0.09003057));
+    assert(close_enough((*sm_res->data)[1], 0.24472847));
+    assert(close_enough((*sm_res->data)[2], 0.66524096));
+
+    // compute log_softmax along row dimension (dim 1)
+    auto lsm_res = act_tensor->log_softmax(1);
+    assert(close_enough((*lsm_res->data)[0], std::log(0.09003057)));
+    assert(close_enough((*lsm_res->data)[2], std::log(0.66524096)));
+
+    // check automatic backward pass propagation through the composed graph
+    sm_res->backward();
+    assert(act_tensor->grad->size() == 6);
+    
+    // mathematically, the sum of gradients for any row of a softmax output must equal 0.0
+    double row0_grad_sum = (*act_tensor->grad)[0] + (*act_tensor->grad)[1] + (*act_tensor->grad)[2];
+    assert(close_enough(row0_grad_sum, 0.0));
+    std::cout << "[PASS] advanced activations (softmax, log_softmax) compositional autograd verified\n";
+
+    // test 22: verifying sparse categorical cross entropy loss forward and backpropagation sweeps
+    std::vector<double> scce_logits = {1.0, 2.0, 3.0,   // sample 0 logit scores
+                                       1.0, 5.0, 1.0};  // sample 1 logit scores
+    auto s_logits = std::make_shared<Tensor>(scce_logits, std::vector<size_t>{2, 3}, true);
+    
+    // integer class targets (sample 0 belongs to class 2, sample 1 belongs to class 1)
+    std::vector<double> scce_targets = {2.0, 1.0};
+    auto s_targets = std::make_shared<Tensor>(scce_targets, std::vector<size_t>{2}, false);
+    
+    SparseCategoricalCrossEntropyLoss criterion;
+    auto loss_val = criterion(s_logits, s_targets);
+    
+    // analytical baseline check:
+    // sample 0 log_softmax at index 2 is approx -0.407606
+    // sample 1 log_softmax at index 1 is approx -0.035987
+    // negative mean loss = -(-0.407606 + -0.035987) / 2 = 0.221791
+    assert(close_enough((*loss_val->data)[0], 0.22179113));
+    
+    // backpropagate directly through the categorical cross entropy loss node
+    loss_val->backward();
+    assert(s_logits->grad->size() == 6);
+    
+    // verify gradient values match standard softmax probability offset profiles
+    // sample 0, class 2 gradient: (prob - target)/N = (0.665241 - 1.0)/2 = -0.167379
+    assert(close_enough((*s_logits->grad)[2], -0.16737953));
+    // sample 1, class 1 gradient: (prob - target)/N = (0.964663 - 1.0)/2 = -0.017669
+    assert(close_enough((*s_logits->grad)[4], -0.01766872)); 
+    std::cout << "[PASS] sparse categorical cross entropy loss operations and auto-differentiation verified\n";
 
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;

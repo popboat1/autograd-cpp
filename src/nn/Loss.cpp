@@ -43,3 +43,56 @@ TensorPtr CrossEntropyLoss::operator()(const TensorPtr& logits, const TensorPtr&
 
     return total_loss * N_tensor;
 }
+
+// sparse categorical cross entropy loss
+TensorPtr SparseCategoricalCrossEntropyLoss::operator()(const TensorPtr& logits, const TensorPtr& targets) {
+    if (logits->shape.size() < 2) {
+        throw std::invalid_argument("sparse categorical cross entropy loss: logits must be at least 2d!");
+    }
+    
+    size_t batch_size = logits->shape[0];
+    size_t num_classes = logits->shape[1];
+    
+    if (targets->data->size() != batch_size) {
+        throw std::invalid_argument("sparse categorical cross entropy loss: targets size must match batch size!");
+    }
+    
+    // compute stable log softmax probabilities using the compositional op
+    auto log_probs = logits->log_softmax(1);
+    
+    double loss_sum = 0.0;
+    std::vector<size_t> target_indices(batch_size);
+    
+    // extract log probabilities corresponding to the integer target indices
+    for (size_t b = 0; b < batch_size; ++b) {
+        size_t target_idx = static_cast<size_t>((*targets->data)[b]);
+        if (target_idx >= num_classes) {
+            throw std::out_of_range("sparse categorical cross entropy loss: target index out of bounds!");
+        }
+        target_indices[b] = target_idx;
+        loss_sum += (*log_probs->data)[b * num_classes + target_idx];
+    }
+    
+    // compute negative mean loss scalar
+    double final_loss = -loss_sum / static_cast<double>(batch_size);
+    
+    // pack into a new tracking graph node depending on the log_probs tensor
+    auto out = std::make_shared<Tensor>(std::vector<double>{final_loss}, std::vector<size_t>{1}, std::vector<TensorPtr>{log_probs}, "sparse_categorical_cross_entropy");
+    
+    // backward pass routes upstream loss scale back to selected target class nodes
+    std::weak_ptr<Tensor> weak_out = out;
+    out->backward_func = [log_probs, target_indices, batch_size, num_classes, weak_out]() {
+        if (auto out_ptr = weak_out.lock()) {
+            if (log_probs->requires_grad) {
+                double upstream_grad = (*out_ptr->grad)[0];
+                double grad_scale = -1.0 / static_cast<double>(batch_size);
+                for (size_t b = 0; b < batch_size; ++b) {
+                    size_t flat_idx = b * num_classes + target_indices[b];
+                    (*log_probs->grad)[flat_idx] += upstream_grad * grad_scale;
+                }
+            }
+        }
+    };
+    
+    return out;
+}

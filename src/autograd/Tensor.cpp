@@ -1056,6 +1056,35 @@ TensorPtr Tensor::pow(double exponent){
     return out;
 }
 
+// softmax
+TensorPtr Tensor::softmax(size_t dim) {
+    // find max values along target dimension with keepdim=true for broadcasting
+    auto max_val = max(dim, true);
+    
+    // subtract the max to shift logits and prevent exponential overflow explosion
+    auto shifted = shared_from_this() - max_val;
+    
+    // compute numerators
+    auto exps = shifted->exp();
+    
+    // compute denominators along the same target dimension axis block
+    auto sum_exps = exps->sum(dim, true);
+    
+    // element-wise division computes final probabilities seamlessly via broadcasting
+    return exps / sum_exps;
+}
+
+// log_softmax using the log-sum-exp trick
+TensorPtr Tensor::log_softmax(size_t dim) {
+    auto max_val = max(dim, true);
+    auto shifted = shared_from_this() - max_val;
+    auto exps = shifted->exp();
+    auto sum_exps = exps->sum(dim, true);
+    
+    // x - x_max - log(sum(exp(x - x_max)))
+    return shifted - sum_exps->log();
+}
+
 // tensor->mean() function
 TensorPtr Tensor::mean(size_t dim, bool keepdim){
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
