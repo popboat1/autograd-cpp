@@ -1601,11 +1601,14 @@ TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
 }
 
 TensorPtr Tensor::sqrt(){
-    std::vector<double> out_vals(data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals(total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for (size_t i = 0; i < data->size(); ++i) {
+    for (size_t i = 0; i < total_elements; ++i) {
         size_t flat_idx = get_flat_index(coords);
         if ((*data)[flat_idx] < 0.0) {
             throw std::runtime_error("sqrt: cannot calculate square root of a negative value");
@@ -1624,11 +1627,12 @@ TensorPtr Tensor::sqrt(){
         if (auto out_ptr = weak_out.lock()) {
             if (self->requires_grad) {
                 std::vector<size_t> back_coords(self->shape.size(), 0);
-                for (size_t i = 0; i < self->data->size(); ++i) {
+                for (size_t i = 0; i < out_ptr->data->size(); ++i) {
                     size_t flat_idx = self->get_flat_index(back_coords);
                     
                     // derivative of sqrt(x) is 0.5 / sqrt(x)
-                    double local_derivative = 0.5 / (*out_ptr->data)[i];
+                    // guard against 0.0 inputs to avoid inf expansion and nan graph corruption
+                    double local_derivative = ((*out_ptr->data)[i] == 0.0) ? 0.0 : (0.5 / (*out_ptr->data)[i]);
                     (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * local_derivative;
                     
                     advance_coordinates(back_coords, self->shape);
