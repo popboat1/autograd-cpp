@@ -214,9 +214,13 @@ TensorPtr Tensor::contiguous() {
         return shared_from_this();
     }
     
-    std::vector<double> contiguous_values(data->size());
+    // calculate logical elements from shape instead of physical data footprint
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+    
+    std::vector<double> contiguous_values(total_elements);
     std::vector<size_t> coords(shape.size(), 0);
-    for (size_t i = 0; i < data->size(); ++i) {
+    for (size_t i = 0; i < total_elements; ++i) {
         contiguous_values[i] = (*data)[get_flat_index(coords)];
         advance_coordinates(coords, shape);
     }
@@ -225,10 +229,10 @@ TensorPtr Tensor::contiguous() {
     
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
-    out->backward_func = [self, weak_out]() {
+    out->backward_func = [self, weak_out, total_elements]() {
         if (auto out_ptr = weak_out.lock()) {
             std::vector<size_t> back_coords(self->shape.size(), 0);
-            for (size_t i = 0; i < self->data->size(); ++i) {
+            for (size_t i = 0; i < total_elements; ++i) {
                 size_t flat_idx = self->get_flat_index(back_coords);
                 (*self->grad)[flat_idx] += (*out_ptr->grad)[i];
                 advance_coordinates(back_coords, self->shape);
@@ -1517,8 +1521,9 @@ TensorPtr operator==(const Tensor& lhs, const Tensor& rhs) {
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
     
-    auto lhs_ptr = std::make_shared<Tensor>(*lhs.data, lhs.shape, false);
-    auto rhs_ptr = std::make_shared<Tensor>(*rhs.data, rhs.shape, false);
+    // leverage zero-copy layout view constructors instead of cloning memory vectors
+    auto lhs_ptr = std::make_shared<Tensor>(lhs.data, lhs.grad, lhs.shape, std::vector<TensorPtr>{}, "");
+    auto rhs_ptr = std::make_shared<Tensor>(rhs.data, rhs.grad, rhs.shape, std::vector<TensorPtr>{}, "");
     lhs_ptr->strides = lhs.strides;
     rhs_ptr->strides = rhs.strides;
     
@@ -1545,8 +1550,8 @@ TensorPtr operator<(const Tensor& lhs, const Tensor& rhs) {
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
     
-    auto lhs_ptr = std::make_shared<Tensor>(*lhs.data, lhs.shape, false);
-    auto rhs_ptr = std::make_shared<Tensor>(*rhs.data, rhs.shape, false);
+    auto lhs_ptr = std::make_shared<Tensor>(lhs.data, lhs.grad, lhs.shape, std::vector<TensorPtr>{}, "");
+    auto rhs_ptr = std::make_shared<Tensor>(rhs.data, rhs.grad, rhs.shape, std::vector<TensorPtr>{}, "");
     lhs_ptr->strides = lhs.strides;
     rhs_ptr->strides = rhs.strides;
     
@@ -1573,8 +1578,8 @@ TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
     
-    auto lhs_ptr = std::make_shared<Tensor>(*lhs.data, lhs.shape, false);
-    auto rhs_ptr = std::make_shared<Tensor>(*rhs.data, rhs.shape, false);
+    auto lhs_ptr = std::make_shared<Tensor>(lhs.data, lhs.grad, lhs.shape, std::vector<TensorPtr>{}, "");
+    auto rhs_ptr = std::make_shared<Tensor>(rhs.data, rhs.grad, rhs.shape, std::vector<TensorPtr>{}, "");
     lhs_ptr->strides = lhs.strides;
     rhs_ptr->strides = rhs.strides;
     
@@ -1637,11 +1642,14 @@ TensorPtr Tensor::sqrt(){
 
 // element-wise negation
 TensorPtr Tensor::neg(){    
-    std::vector<double> out_vals(data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals(total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for (size_t i = 0; i < data->size(); ++i) {
+    for (size_t i = 0; i < total_elements; ++i) {
         size_t flat_idx = get_flat_index(coords);
         out_vals[i] = -(*data)[flat_idx];
         advance_coordinates(coords, shape);
@@ -1657,7 +1665,7 @@ TensorPtr Tensor::neg(){
         if (auto out_ptr = weak_out.lock()) {
             if (self->requires_grad) {
                 std::vector<size_t> back_coords(self->shape.size(), 0);
-                for (size_t i = 0; i < self->data->size(); ++i) {
+                for (size_t i = 0; i < out_ptr->data->size(); ++i) {
                     size_t flat_idx = self->get_flat_index(back_coords);
                     
                     // derivative of -x is -1.0
