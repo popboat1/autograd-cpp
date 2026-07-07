@@ -473,7 +473,9 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
 
 // tensor * scalar ops
 TensorPtr operator*(const TensorPtr& lhs, double rhs) {
-    size_t total_elements = lhs->data->size();
+    size_t total_elements = 1;
+    for (size_t s : lhs->shape) total_elements *= s;
+
     std::vector<double> out_values(total_elements);
     std::vector<size_t> coords(lhs->shape.size(), 0);
     
@@ -486,12 +488,11 @@ TensorPtr operator*(const TensorPtr& lhs, double rhs) {
     auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::vector<TensorPtr>{lhs}, "*");
 
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out]() {
+    out->backward_func = [lhs, rhs, weak_out, total_elements]() {
         if (auto out_ptr = weak_out.lock()) {
             if (lhs->requires_grad) {
                 std::vector<size_t> back_coords(lhs->shape.size(), 0);
-                size_t elements = lhs->data->size();
-                for (size_t i = 0; i < elements; ++i) {
+                for (size_t i = 0; i < total_elements; ++i) {
                     size_t flat_idx = lhs->get_flat_index(back_coords);
                     (*lhs->grad)[flat_idx] += (*out_ptr->grad)[i] * rhs;
                     Tensor::advance_coordinates(back_coords, lhs->shape);
@@ -858,11 +859,14 @@ TensorPtr Tensor::transpose(size_t dim0, size_t dim1) {
 
 // ReLU
 TensorPtr Tensor::relu(){
-    std::vector<double> out_vals(data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals(total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for(size_t i {0}; i < data->size(); ++i){
+    for(size_t i {0}; i < total_elements; ++i){
         size_t flat_idx = get_flat_index(coords);
         out_vals[i] = (*data)[flat_idx] > 0.0 ? (*data)[flat_idx] : 0.0;
         advance_coordinates(coords, shape);
@@ -873,10 +877,10 @@ TensorPtr Tensor::relu(){
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
-    out->backward_func = [self, weak_out](){
+    out->backward_func = [self, weak_out, total_elements](){
         if(auto out_ptr = weak_out.lock()){
             std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < self->data->size(); ++i){
+            for(size_t i = 0; i < total_elements; ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double local_derivative = (*self->data)[flat_idx] > 0.0 ? 1.0 : 0.0;
                 if (self->requires_grad){
@@ -892,11 +896,14 @@ TensorPtr Tensor::relu(){
 
 // exp function
 TensorPtr Tensor::exp(){
-    std::vector<double> out_vals(data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals(total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for(size_t i {0}; i < data->size(); ++i){
+    for(size_t i {0}; i < total_elements; ++i){
         size_t flat_idx = get_flat_index(coords);
         out_vals[i] = std::exp((*data)[flat_idx]);
         advance_coordinates(coords, shape);
@@ -907,10 +914,10 @@ TensorPtr Tensor::exp(){
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
-    out->backward_func = [self, weak_out]() {
+    out->backward_func = [self, weak_out, total_elements]() {
         if(auto out_ptr = weak_out.lock()){
             std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < self->data->size(); ++i){
+            for(size_t i = 0; i < total_elements; ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 if(self->requires_grad){
                     (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (*out_ptr->data)[i];
@@ -925,11 +932,14 @@ TensorPtr Tensor::exp(){
 
 //tanh function
 TensorPtr Tensor::tanh(){
-    std::vector<double> out_vals (data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals (total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for(size_t i {0}; i < data->size(); ++i){
+    for(size_t i {0}; i < total_elements; ++i){
         size_t flat_idx = get_flat_index(coords);
         out_vals[i] = std::tanh((*data)[flat_idx]);
         advance_coordinates(coords, shape);
@@ -940,10 +950,10 @@ TensorPtr Tensor::tanh(){
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
-    out->backward_func = [self, weak_out](){
+    out->backward_func = [self, weak_out, total_elements](){
         if(auto out_ptr = weak_out.lock()){
             std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < self->data->size(); ++i){
+            for(size_t i = 0; i < total_elements; ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double t = (*out_ptr->data)[i];
                 if(self->requires_grad){
@@ -960,11 +970,14 @@ TensorPtr Tensor::tanh(){
 
 // sigmoid function
 TensorPtr Tensor::sigmoid(){
-    std::vector<double> out_vals(data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals(total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for(size_t i {0}; i < data->size(); ++i){
+    for(size_t i {0}; i < total_elements; ++i){
         size_t flat_idx = get_flat_index(coords);
         out_vals[i] = 1.0 / (1.0 + std::exp(-(*data)[flat_idx]));
         advance_coordinates(coords, shape);
@@ -975,10 +988,10 @@ TensorPtr Tensor::sigmoid(){
     //backward pass
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
-    out->backward_func = [self, weak_out]() {
+    out->backward_func = [self, weak_out, total_elements]() {
         if(auto out_ptr = weak_out.lock()){
             std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < self->data->size(); ++i){
+            for(size_t i = 0; i < total_elements; ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double s = (*out_ptr->data)[i];
                 if(self->requires_grad){
@@ -994,11 +1007,14 @@ TensorPtr Tensor::sigmoid(){
 
 // log function (natural log)
 TensorPtr Tensor::log(){
-    std::vector<double> out_vals(data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals(total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for(size_t i {0}; i < data->size(); ++i){
+    for(size_t i {0}; i < total_elements; ++i){
         size_t flat_idx = get_flat_index(coords);
         out_vals[i] = std::log((*data)[flat_idx]);
         advance_coordinates(coords, shape);
@@ -1009,10 +1025,10 @@ TensorPtr Tensor::log(){
     // backward pass
     auto self = shared_from_this();
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [self, weak_out]() {
+    out->backward_func = [self, weak_out, total_elements]() {
         if(auto out_ptr = weak_out.lock()){
             std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < self->data->size(); ++i){
+            for(size_t i = 0; i < total_elements; ++i){
                 size_t flat_idx = self->get_flat_index(back_coords);
                 if(self->requires_grad){
                     (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 / (*self->data)[flat_idx]);
@@ -1027,11 +1043,14 @@ TensorPtr Tensor::log(){
 
 // pow function
 TensorPtr Tensor::pow(double exponent){
-    std::vector<double> out_vals (data->size());
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    std::vector<double> out_vals (total_elements);
     std::vector<size_t> coords(shape.size(), 0);
 
     // forward pass
-    for(size_t i {0}; i < data->size(); ++i){
+    for(size_t i = 0; i < total_elements; ++i){
         size_t flat_idx = get_flat_index(coords);
         out_vals[i] = std::pow((*data)[flat_idx], exponent);
         advance_coordinates(coords, shape);
@@ -1043,10 +1062,10 @@ TensorPtr Tensor::pow(double exponent){
     std::weak_ptr<Tensor> weak_out = out;
     auto self = shared_from_this();
     // explicitly capture the exponent by value
-    out->backward_func = [self, weak_out, exponent]() {
+    out->backward_func = [self, weak_out, exponent, total_elements]() {
         if (auto out_ptr = weak_out.lock()) {
             std::vector<size_t> back_coords(self->shape.size(), 0);
-            for (size_t i = 0; i < self->data->size(); ++i) {
+            for (size_t i = 0; i < total_elements; ++i) {
                 size_t flat_idx = self->get_flat_index(back_coords);
                 double local_derivative = exponent * std::pow((*self->data)[flat_idx], exponent - 1.0);
                 if(self->requires_grad){
@@ -1775,10 +1794,14 @@ TensorPtr Tensor::argsort(size_t dim, bool descending) {
     for (size_t i = dim + 1; i < shape.size(); ++i) {
         inner_block_size *= shape[i];
     }
-    size_t total_elements = data->size();
+
+    // compute logical elements from shape instead of physical data buffer size
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+    
     size_t outer_block_size = total_elements / (reduced_size * inner_block_size);
 
-    // allocate contiguous output buffer matching original size
+    // allocate contiguous output buffer matching logical size
     std::vector<double> out_vals(total_elements);
 
     // process each sliced block independently
@@ -1952,7 +1975,10 @@ void Tensor::print() const {
         return;
     }
 
-    size_t total_elements = this->data->size();
+    // compute logical elements from shape instead of physical data buffer size
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+    
     size_t ndim = this->shape.size();
     std::vector<size_t> current_idx(ndim, 0);
 
