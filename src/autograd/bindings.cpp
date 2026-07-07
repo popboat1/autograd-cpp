@@ -2,13 +2,42 @@
 #include <pybind11/stl.h>
 #include <pybind11/operators.h>
 #include "autograd/Tensor.h"
+#include "nn/Module.h"
 #include "nn/Linear.h"
+#include "nn/Conv2D.h"
+#include "nn/MaxPool2D.h"
+#include "nn/Sequential.h"
 #include "nn/MLP.h"
 #include "optim/SGD.h"
 #include "nn/Loss.h"
 #include "utils/RNG.h"
 
 namespace py = pybind11;
+
+// ----------------------------------------------------
+// PYBIND11 TRAMPOLINE CLASS FOR MODULE SUBCLASSING
+// ----------------------------------------------------
+class PyModule : public Module {
+public:
+    using Module::Module;
+
+    TensorPtr forward(const TensorPtr& input) override {
+        PYBIND11_OVERRIDE_PURE(
+            TensorPtr,
+            Module,
+            forward,
+            input
+        );
+    }
+
+    std::vector<TensorPtr> parameters() const override {
+        PYBIND11_OVERRIDE(
+            std::vector<TensorPtr>,
+            Module,
+            parameters
+        );
+    }
+};
 
 PYBIND11_MODULE(autograd_cpp, m) {
     m.doc() = "C++ ML Framework Python Bindings (Tensor Engine)";
@@ -92,21 +121,52 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("__gt__", [](const TensorPtr& lhs, const TensorPtr& rhs) { return *lhs > *rhs; });
     
     // ----------------------------------------------------
+    // BASE MODULE BINDING
+    // ----------------------------------------------------
+    py::class_<Module, PyModule, std::shared_ptr<Module>>(m, "Module")
+        .def(py::init<>())
+        .def("forward", &Module::forward)
+        .def("parameters", &Module::parameters)
+        .def("zero_grad", &Module::zero_grad)
+        .def("__setattr__", [](py::object self, const std::string& name, py::object value) {
+            if (py::isinstance<Module>(value)) {
+                auto native_self = self.cast<std::shared_ptr<Module>>();
+                auto native_mod = value.cast<std::shared_ptr<Module>>();
+                
+                native_self->register_submodule(native_mod);
+            }
+            
+            auto builtins = py::module_::import("builtins");
+            auto object_setattr = builtins.attr("object").attr("__setattr__");
+            object_setattr(self, name, value);
+        });
+    
+    // ----------------------------------------------------
     // NEURAL NETWORK BINDINGS
     // ----------------------------------------------------
-    py::class_<Linear>(m, "Linear")
+    py::class_<Linear, Module, std::shared_ptr<Linear>>(m, "Linear")
         .def(py::init<int, int, const std::string&>(), 
-             py::arg("fan_in"), py::arg("fan_out"), py::arg("init_type") = "kaiming")
-        .def("forward", &Linear::forward)
-        .def("parameters", &Linear::parameters);
+             py::arg("fan_in"), py::arg("fan_out"), py::arg("init_type") = "kaiming");
 
-    py::class_<MLP>(m, "MLP")
+    py::class_<Conv2D, Module, std::shared_ptr<Conv2D>>(m, "Conv2D")
+        .def(py::init<size_t, size_t, size_t, size_t, size_t>(),
+             py::arg("in_channels"), py::arg("out_channels"), py::arg("kernel_size"), 
+             py::arg("stride") = 1, py::arg("padding") = 0);
+
+    py::class_<MaxPool2D, Module, std::shared_ptr<MaxPool2D>>(m, "MaxPool2D")
+        .def(py::init<size_t, size_t>(),
+             py::arg("kernel_size"), py::arg("stride") = 2);
+
+    py::class_<Sequential, Module, std::shared_ptr<Sequential>>(m, "Sequential")
+        .def(py::init<>())
+        .def("add", &Sequential::add, py::arg("layer"))
+        .def("__call__", [](Sequential& self, const TensorPtr& input) { return self.forward(input); });
+
+    py::class_<MLP, Module, std::shared_ptr<MLP>>(m, "MLP")
         .def(py::init<int, std::vector<int>, std::string>(), 
              py::arg("fan_in"), 
              py::arg("hidden_sizes"), 
-             py::arg("activation_layer") = "")
-        .def("forward", &MLP::forward)
-        .def("parameters", &MLP::parameters);
+             py::arg("activation_layer") = "");
     
     // ----------------------------------------------------
     // OPTIMIZER & LOSS BINDINGS

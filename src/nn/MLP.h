@@ -13,7 +13,7 @@ public:
     // bias, dropout, norm_layer, inplace
     );
 
-    TensorPtr forward(const TensorPtr& xin); // forward pass
+    TensorPtr forward(const TensorPtr& xin) override; // forward pass
     std::vector<TensorPtr> parameters() const override; // params
 
 private:
