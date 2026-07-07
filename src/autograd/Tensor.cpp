@@ -244,6 +244,28 @@ TensorPtr Tensor::contiguous() {
 
 // in-place addition supporting standard fast-paths and multi-dimensional coordinate loops
 TensorPtr Tensor::add_(const TensorPtr& other) {
+    // copy-on-write layout materialization to protect shared views and autograd history
+    if (!is_contiguous() || data.use_count() > 1) {
+        size_t total_elements = 1;
+        for (size_t s : shape) total_elements *= s;
+        
+        std::vector<double> contiguous_values(total_elements);
+        std::vector<size_t> coords(shape.size(), 0);
+        for (size_t i = 0; i < total_elements; ++i) {
+            contiguous_values[i] = (*data)[get_flat_index(coords)];
+            advance_coordinates(coords, shape);
+        }
+        
+        data = std::make_shared<std::vector<double>>(contiguous_values);
+        
+        strides.resize(shape.size(), 1);
+        if (!shape.empty()) {
+            for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
+                strides[i] = strides[i + 1] * shape[i + 1];
+            }
+        }
+    }
+
     if (is_contiguous() && other->is_contiguous() && shape == other->shape) {
         for (size_t i = 0; i < data->size(); ++i) {
             (*data)[i] += (*other->data)[i];
@@ -272,6 +294,28 @@ TensorPtr Tensor::add_(const TensorPtr& other) {
 
 // in-place substraction
 TensorPtr Tensor::sub_(const TensorPtr& other) {
+    // copy-on-write layout materialization to protect shared views and autograd history
+    if (!is_contiguous() || data.use_count() > 1) {
+        size_t total_elements = 1;
+        for (size_t s : shape) total_elements *= s;
+        
+        std::vector<double> contiguous_values(total_elements);
+        std::vector<size_t> coords(shape.size(), 0);
+        for (size_t i = 0; i < total_elements; ++i) {
+            contiguous_values[i] = (*data)[get_flat_index(coords)];
+            advance_coordinates(coords, shape);
+        }
+        
+        data = std::make_shared<std::vector<double>>(contiguous_values);
+        
+        strides.resize(shape.size(), 1);
+        if (!shape.empty()) {
+            for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
+                strides[i] = strides[i + 1] * shape[i + 1];
+            }
+        }
+    }
+
     if (is_contiguous() && other->is_contiguous() && shape == other->shape) {
         for (size_t i = 0; i < data->size(); ++i) {
             (*data)[i] -= (*other->data)[i];
