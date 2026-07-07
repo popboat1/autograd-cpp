@@ -37,6 +37,9 @@ add_executable(autograd_main
     src/optim/SGD.cpp
     src/nn/Loss.cpp
     src/autograd/Tensor.cpp
+    src/nn/Conv2D.cpp
+    src/nn/MaxPool2D.cpp
+    src/nn/Sequential.cpp
 )
 
 # compile to python library
@@ -47,6 +50,9 @@ pybind11_add_module(autograd_cpp
     src/optim/SGD.cpp
     src/nn/Loss.cpp
     src/autograd/Tensor.cpp
+    src/nn/Conv2D.cpp
+    src/nn/MaxPool2D.cpp
+    src/nn/Sequential.cpp
 )
 
 target_link_options(autograd_cpp PRIVATE "-static-libgcc" "-static-libstdc++")
