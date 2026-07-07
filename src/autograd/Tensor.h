@@ -38,7 +38,7 @@ private:
     // helper function to calculate all the boilerplate metadata
     ReductionMeta prepare_reduction_metadata(size_t dim, bool keepdim) const;
     
-    void ensure_grad_allocated();
+    
     
 public:
     // advances an N-dimensional coordinate vector right-to-left; returns false when fully complete
@@ -144,6 +144,8 @@ public:
 
     // prints metadata footprint and formatted multi-dimensional bracket layouts
     void print() const;
+
+    void ensure_grad_allocated();
 };
 
 #endif
