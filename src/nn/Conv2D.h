@@ -5,7 +5,7 @@
 #include "autograd/Tensor.h"
 #include <vector>
 
-class Conv2D : public Module {
+class Conv2D : public Module, public std::enable_shared_from_this<Conv2D> {
 private:
     std::vector<double> im2col(
         const TensorPtr& input, 

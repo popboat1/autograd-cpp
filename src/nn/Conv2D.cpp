@@ -167,18 +167,33 @@ TensorPtr Conv2D::forward(const TensorPtr& input){
 
     // accumulate layer channel biases via standard broadcasting
     auto gemm_out_biased = gemm_out + bias;
-    
-    // reconstruct back into framework standard 4D vision shape
-    auto final_4d = gemm_out_biased->view({
-        static_cast<int>(batch_size), 
-        static_cast<int>(out_channels), 
-        static_cast<int>(out_h), 
-        static_cast<int>(out_w)
-    });
 
-    input_col_tensor->backward_func = [this, x, input_col_tensor, out_h, out_w]() {
-        if (x->requires_grad) {
-            this->col2im(*input_col_tensor->grad, x, out_h, out_w);
+    // map the true NHWC layout first
+    auto intermediate_nhwc = gemm_out_biased->view({
+        static_cast<int>(batch_size), 
+        static_cast<int>(out_h), 
+        static_cast<int>(out_w),
+        static_cast<int>(out_channels)
+    });
+    
+    // permute axes safely from NHWC [0, 1, 2, 3] to NCHW [0, 3, 1, 2]
+    auto final_4d = intermediate_nhwc->permute({0, 3, 1, 2});
+
+    // establish safe weak references to break cyclic tracking loops and avoid dangling pointers
+    std::weak_ptr<Tensor> weak_col = input_col_tensor;
+    std::weak_ptr<Tensor> weak_x = x;
+    std::weak_ptr<const Conv2D> weak_this = shared_from_this();
+
+    input_col_tensor->backward_func = [weak_this, weak_x, weak_col, out_h, out_w]() {
+        auto x_ptr = weak_x.lock();
+        auto col_ptr = weak_col.lock();
+        auto this_ptr = weak_this.lock();
+        
+        // only execute backpropagation if all components are alive in memory
+        if (this_ptr && x_ptr && col_ptr) {
+            if (x_ptr->requires_grad) {
+                this_ptr->col2im(*col_ptr->grad, x_ptr, out_h, out_w);
+            }
         }
     };
 

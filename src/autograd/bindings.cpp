@@ -58,8 +58,16 @@ PYBIND11_MODULE(autograd_cpp, m) {
             [](TensorPtr& t, std::vector<double> v) { *t->data = v; } // setter
         )
         .def_property("grad",
-            [](const TensorPtr& t) { return *t->grad; },
-            [](TensorPtr& t, std::vector<double> v) { *t->grad = v; }
+            [](const TensorPtr& t) { 
+                // allocate zero-filled gradient buffer if it does not exist yet
+                t->ensure_grad_allocated(); 
+                return *t->grad; 
+            },
+            [](TensorPtr& t, std::vector<double> v) { 
+                // allocate gradient buffer before copying values from python list
+                t->ensure_grad_allocated(); 
+                *t->grad = v; 
+                }
         )
         .def_readonly("shape", &Tensor::shape)
         .def_readonly("strides", &Tensor::strides)
