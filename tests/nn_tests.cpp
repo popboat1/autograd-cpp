@@ -9,6 +9,7 @@
 #include "nn/Sequential.h"
 #include "nn/Loss.h"
 #include "optim/SGD.h"
+#include "optim/Adam.h"
 #include "utils/RNG.h"
 
 // helper to assert floating point parity
@@ -120,6 +121,53 @@ void test_vision_modules_autograd() {
     std::cout << "[PASS] Graph execution timing and custom col2im / routing loops verified\n\n";
 }
 
+void test_sequential_mlp_adam_convergence() {
+    std::cout << "Running Sequential MLP Integration Test (Adam)...\n";
+
+    // identical target dataset setup
+    std::vector<double> X_vals = {
+        2.0,  3.0, -1.0,
+        3.0, -1.0,  0.5,
+        0.5,  1.0,  1.0,
+        1.0,  1.0, -1.0
+    };
+    auto X = std::make_shared<Tensor>(X_vals, std::vector<size_t>{4, 3}, false);
+
+    std::vector<double> Y_vals = {1.0, -1.0, -1.0, 1.0};
+    auto Y = std::make_shared<Tensor>(Y_vals, std::vector<size_t>{4, 1}, false);
+
+    auto model = std::make_shared<Sequential>();
+    model->add(std::make_shared<Linear>(3, 4));
+    model->add(std::make_shared<Linear>(4, 4));
+    model->add(std::make_shared<Linear>(4, 1));
+
+    // instantiate our new adam optimizer module with a higher learning rate for fast toy task convergence
+    Adam optimizer(model->parameters(), 0.02, {0.9, 0.999}, 1e-8, 0.01, false, false);
+    MSELoss criterion;
+
+    double initial_loss = 0.0;
+    double final_loss = 0.0;
+
+    for (int step = 0; step < 20; ++step) {
+        auto preds = model->forward(X);
+        auto loss = criterion(preds, Y);
+        double current_loss = (*loss->data)[0];
+
+        if (step == 0) initial_loss = current_loss;
+        if (step == 19) final_loss = current_loss;
+
+        std::cout << "step " << step << " | loss: " << current_loss << "\n";
+
+        optimizer.zero_grad();
+        loss->backward();
+        optimizer.step();
+    }
+
+    std::cout << "  Initial Loss: " << initial_loss << " -> Final Loss: " << final_loss << "\n";
+    assert(final_loss < initial_loss);
+    std::cout << "[PASS] Adam adaptive optimization step adjustments verified successfully\n\n";
+}
+
 int main() {
     std::cout << "starting neural network integration tests\n";
     std::cout << "----------------------------------------\n";
@@ -127,6 +175,7 @@ int main() {
     RNG::manual_seed(42);
 
     test_sequential_mlp_convergence();
+    test_sequential_mlp_adam_convergence();
     test_vision_modules_autograd();
 
     std::cout << "----------------------------------------\n";

@@ -35,6 +35,7 @@ add_executable(autograd_main
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
+    src/optim/Adam.cpp
     src/nn/Loss.cpp
     src/autograd/Tensor.cpp
     src/nn/Conv2D.cpp
@@ -48,6 +49,7 @@ pybind11_add_module(autograd_cpp
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
+    src/optim/Adam.cpp
     src/nn/Loss.cpp
     src/autograd/Tensor.cpp
     src/nn/Conv2D.cpp
