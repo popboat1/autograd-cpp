@@ -9,6 +9,7 @@
 #include "nn/Sequential.h"
 #include "nn/MLP.h"
 #include "optim/SGD.h"
+#include "optim/Adam.h"
 #include "nn/Loss.h"
 #include "utils/RNG.h"
 
@@ -189,6 +190,18 @@ PYBIND11_MODULE(autograd_cpp, m) {
              py::arg("weight_decay") = 0.0)
         .def("step", &SGD::step)
         .def("zero_grad", &SGD::zero_grad);
+    
+    py::class_<Adam>(m_optim, "Adam")
+        .def(py::init<std::vector<TensorPtr>, double, std::pair<double, double>, double, double, bool, bool>(),
+             py::arg("params"),
+             py::arg("lr") = 0.001,
+             py::arg("betas") = std::make_pair(0.9, 0.999),
+             py::arg("eps") = 1e-8,
+             py::arg("weight_decay") = 0.0,
+             py::arg("amsgrad") = false,
+             py::arg("maximize") = false)
+        .def("step", &Adam::step)
+        .def("zero_grad", &Adam::zero_grad);
     
     py::class_<MSELoss>(m, "MSELoss")
         .def(py::init<>())
