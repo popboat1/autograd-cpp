@@ -8,35 +8,35 @@
 
 // constructor for leaf nodes
 Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requires_grad)
-    : data(std::make_shared<std::vector<double>>(values)),
+    : data(std::make_shared<std::vector<double>>(std::move(values))),
       grad(nullptr),
-      shape(shape), requires_grad(requires_grad), op(""), backward_func([](){}) {
+      shape(std::move(shape)), requires_grad(requires_grad), op(""), backward_func([](){}) {
     
     // compute row-major strides
-    strides.resize(shape.size(), 1);
-    if (!shape.empty()){
-        for(int i {static_cast<int>(shape.size()) - 2}; i >= 0; --i){
-            strides[i] = strides[i + 1] * shape[i + 1];
+    strides.resize(this->shape.size(), 1);
+    if (!this->shape.empty()){
+        for(int i {static_cast<int>(this->shape.size()) - 2}; i >= 0; --i){
+            strides[i] = strides[i + 1] * this->shape[i + 1];
         }
     }
 }
 
 // graph constructor for operations
 Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation)
-    : data(std::make_shared<std::vector<double>>(values)), 
+    : data(std::make_shared<std::vector<double>>(std::move(values))), 
       grad(nullptr),
-      shape(shape), requires_grad(false), prev(children), op(operation), backward_func([](){}){
+      shape(std::move(shape)), requires_grad(false), prev(std::move(children)), op(std::move(operation)), backward_func([](){}){
 
     // compute strides for the new shape layout
-    strides.resize(shape.size(), 1);
-    if (!shape.empty()) {
-        for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
-            strides[i] = strides[i + 1] * shape[i + 1];
+    strides.resize(this->shape.size(), 1);
+    if (!this->shape.empty()) {
+        for (int i = static_cast<int>(this->shape.size()) - 2; i >= 0; --i) {
+            strides[i] = strides[i + 1] * this->shape[i + 1];
         }
     }
 
     // inherit tracking state from unique parent nodes
-    for (const auto& child : children) {
+    for (const auto& child : prev) {
         if (child->requires_grad) {
             this->requires_grad = true;
         }
@@ -45,16 +45,16 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vecto
 
 // zero-copy view constructor
 Tensor::Tensor(std::shared_ptr<std::vector<double>> shared_data, std::shared_ptr<std::vector<double>> shared_grad, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation)
-    : data(shared_data), grad(shared_grad), shape(shape), requires_grad(false), prev(children), op(operation), backward_func([](){}) {
+    : data(std::move(shared_data)), grad(std::move(shared_grad)), shape(std::move(shape)), requires_grad(false), prev(std::move(children)), op(std::move(operation)), backward_func([](){}) {
     
-    strides.resize(shape.size(), 1);
-    if (!shape.empty()) {
-        for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
-            strides[i] = strides[i + 1] * shape[i + 1];
+    strides.resize(this->shape.size(), 1);
+    if (!this->shape.empty()) {
+        for (int i = static_cast<int>(this->shape.size()) - 2; i >= 0; --i) {
+            strides[i] = strides[i + 1] * this->shape[i + 1];
         }
     }
 
-    for (const auto& child : children) {
+    for (const auto& child : prev) {
         if (child->requires_grad) this->requires_grad = true;
     }
 }
@@ -642,20 +642,10 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     // compute broadcasting metadata specifically for the batch dimensions
     for (size_t i = 0; i < out_batch_dims; ++i){
         size_t out_idx = out_batch_dims - 1 - i;
-
-        size_t dim_lhs = 1;
-        size_t stride_lhs = 0;
-        if(i < lhs_batch_dims){
-            dim_lhs = lhs->shape[lhs_batch_dims - 1 - i];
-            stride_lhs = lhs->strides[lhs_batch_dims - 1 - i];
-        }
-
-        size_t dim_rhs = 1;
-        size_t stride_rhs = 0;
-        if (i < rhs_batch_dims) {
-            dim_rhs = rhs->shape[rhs_batch_dims - 1 - i];
-            stride_rhs = rhs->strides[rhs_batch_dims - 1 - i];
-        }
+        size_t dim_lhs = (i < lhs_batch_dims) ? lhs->shape[lhs_batch_dims - 1 - i] : 1;
+        size_t stride_lhs = (i < lhs_batch_dims) ? lhs->strides[lhs_batch_dims - 1 - i] : 0;
+        size_t dim_rhs = (i < rhs_batch_dims) ? rhs->shape[rhs_batch_dims - 1 - i] : 1;
+        size_t stride_rhs = (i < rhs_batch_dims) ? rhs->strides[rhs_batch_dims - 1 - i] : 0;
 
         if (dim_lhs == dim_rhs) {
             batch_shape[out_idx] = dim_lhs;
@@ -680,9 +670,7 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     out_shape.push_back(N);
 
     size_t total_batches = 1;
-    for (size_t dim : batch_shape) {
-        total_batches *= dim;
-    }
+    for (size_t dim : batch_shape) total_batches *= dim;
 
     std::vector<double> out_values(total_batches * M * N, 0.0);
 
@@ -692,11 +680,25 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     size_t rhs_stride_K = rhs->strides[rhs_rank - 2];
     size_t rhs_stride_N = rhs->strides[rhs_rank - 1];
 
-    // forward pass
-    std::vector<size_t> current_batch_idx(batch_shape.size(), 0);
+    const double* lhs_ptr = lhs->data->data();
+    const double* rhs_ptr = rhs->data->data();
+    double* out_ptr = out_values.data();
+
+    // forward pass now uses explicit index reconstruction to isolate thread state
+    #pragma omp parallel for schedule(static)
     for (size_t b = 0; b < total_batches; ++b) {
-        size_t batch_lhs_off = Tensor::get_flat_index_from_broadcast(current_batch_idx, lhs_batch_strides);
-        size_t batch_rhs_off = Tensor::get_flat_index_from_broadcast(current_batch_idx, rhs_batch_strides);
+        size_t batch_lhs_off = 0;
+        size_t batch_rhs_off = 0;
+        size_t temp = b;
+
+        // reconstruct strides directly using stack primitives
+        for (int d = static_cast<int>(out_batch_dims) - 1; d >= 0; --d) {
+            size_t coord = temp % batch_shape[d];
+            batch_lhs_off += coord * lhs_batch_strides[d];
+            batch_rhs_off += coord * rhs_batch_strides[d];
+            temp /= batch_shape[d];
+        }
+
         size_t batch_out_off = b * M * N;
 
         // standard 2D matrix multiplication multiplication on the current batch slice
@@ -704,17 +706,15 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
             for (size_t j = 0; j < N; ++j) {
                 double sum_val = 0.0;
                 for (size_t k = 0; k < K; ++k) {
-                    size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
-                    size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
-                    sum_val += (*lhs->data)[lhs_flat] * (*rhs->data)[rhs_flat];
+                    sum_val += lhs_ptr[batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K] * 
+                               rhs_ptr[batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N];
                 }
-                out_values[batch_out_off + i * N + j] = sum_val;
+                out_ptr[batch_out_off + i * N + j] = sum_val;
             }
         }
-        Tensor::advance_coordinates(current_batch_idx, batch_shape);
     }
 
-    auto out = std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{lhs, rhs}, "matmul");
+    auto out = std::make_shared<Tensor>(std::move(out_values), std::move(out_shape), std::vector<TensorPtr>{lhs, rhs}, "matmul");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
@@ -1913,7 +1913,7 @@ void Tensor::backward() {
     build_topo(shared_from_this());
     // allocate gradients for all active graph nodes
     for(auto& node : topo){
-        if(node->requires_grad == true){
+        if(node->requires_grad){
             node->ensure_grad_allocated();
         }
     }
@@ -1922,14 +1922,14 @@ void Tensor::backward() {
     // this ensures downstream layers receive only fresh current-pass updates (matching pytorch),
     // while allowing intermediate nodes to accumulate their user-facing totals at the end.
     std::vector<TensorPtr> intermediate_nodes;
-    std::vector<std::vector<double>> old_grads;
+    std::vector<std::shared_ptr<std::vector<double>>> old_grads;
 
     for(auto& node : topo){
         if(node->requires_grad && !node->prev.empty() && node != shared_from_this()){
             if(node->grad){
                 intermediate_nodes.push_back(node);
-                old_grads.push_back(*node->grad);
-                std::fill(node->grad->begin(), node->grad->end(), 0.0);
+                old_grads.push_back(std::move(node->grad)); // move out the pointer
+                node->grad = std::make_shared<std::vector<double>>(node->data->size(), 0.0); // zero allocation tracking buffer
             }
         }
     }
@@ -1945,12 +1945,16 @@ void Tensor::backward() {
         }
     }
 
-    // restore and accumulate historical sums back into user-facing intermediate buffers
+    // accumulate downstream calculations back into historical tracking buffers
     for(size_t k = 0; k < intermediate_nodes.size(); ++k){
         auto& node = intermediate_nodes[k];
-        const auto& old_vector = old_grads[k];
-        for(size_t i = 0; i < node->grad->size(); ++i){
-            (*node->grad)[i] += old_vector[i];
+        const auto& old_vector_ptr = old_grads[k];
+        double* current_grad = node->grad->data();
+        const double* old_grad_data = old_vector_ptr->data();
+        size_t grad_size = node->grad->size();
+
+        for(size_t i = 0; i < grad_size; ++i){
+            current_grad[i] += old_grad_data[i];
         }
     }
 }
