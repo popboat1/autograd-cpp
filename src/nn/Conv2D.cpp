@@ -20,13 +20,13 @@ Conv2D::Conv2D(size_t in_channels, size_t out_channels, size_t kernel_size, size
 
     std::normal_distribution<double> dist(0.0, std_dev);
 
-    for(size_t i {0}; i < weight_elements; ++i){
+    for(size_t i = 0; i < weight_elements; ++i){
         init_weights[i] = dist(gen);
     }
     
     // construct tensor
-    weight = std::make_shared<Tensor>(init_weights, std::vector<size_t>{out_channels, in_channels, kernel_size, kernel_size}, true);
-    bias = std::make_shared<Tensor>(init_biases, std::vector<size_t>{out_channels}, true);
+    weight = std::make_shared<Tensor>(std::move(init_weights), std::vector<size_t>{out_channels, in_channels, kernel_size, kernel_size}, true);
+    bias = std::make_shared<Tensor>(std::move(init_biases), std::vector<size_t>{out_channels}, true);
 }
 
 std::vector<TensorPtr> Conv2D::parameters() const {
@@ -35,49 +35,55 @@ std::vector<TensorPtr> Conv2D::parameters() const {
 
 // im2col
 // unroll 4d tensor patches into a row-major 2D column matrix vector
+// parallelized using linear pointer tracking and branch-hoisting padding
 std::vector<double> Conv2D::im2col(const TensorPtr& input, size_t out_h, size_t out_w) const {
     size_t batch_size = input->shape[0];
-    size_t in_c = input->shape[1];
     size_t in_h = input->shape[2];
     size_t in_w = input->shape[3];
 
     size_t col_rows = batch_size * out_h * out_w;
     size_t col_cols = in_channels * kernel_size * kernel_size;
     
-    std::vector<double> col_matrix(col_rows * col_cols, 0.0);
+    std::vector<double> col_matrix(col_rows * col_cols);
+    double* col_ptr = col_matrix.data();
+    const double* input_ptr = input->data->data();
+
+    size_t img_stride = in_channels * in_h * in_w;
+    size_t ch_stride = in_h * in_w;
 
     // map input patches to col_matrix rows
-    for(size_t b {0}; b < batch_size; ++b){
-        for(size_t oh {0}; oh < out_h; ++oh){
-            for(size_t ow {0}; ow < out_w; ++ow){
-                //compute the active destination row offset
+    // map input patches to col_matrix rows
+    #pragma omp parallel for collapse(3) schedule(static)
+    for(size_t b = 0; b < batch_size; ++b){
+        for(size_t oh = 0; oh < out_h; ++oh){
+            for(size_t ow = 0; ow < out_w; ++ow){
+                // compute the active destination row offset
                 size_t curr_row = (b * out_h * out_w) + (oh * out_w) + ow;
+                double* local_col_ptr = col_ptr + (curr_row * col_cols);
+                size_t write_idx = 0;
 
-                for(size_t ci {0}; ci < in_channels; ++ci){
-                    for(size_t kh {0}; kh < kernel_size; ++kh){
-                        for(size_t kw {0}; kw < kernel_size; ++kw){
-                            // calculate the current column displacement within this row
-                            size_t curr_col = (ci * kernel_size * kernel_size) + (kh * kernel_size) + kw;
+                for(size_t ci = 0; ci < in_channels; ++ci){
+                    size_t src_channel_offset = b * img_stride + ci * ch_stride;
 
-                            // find target coordinate maps matching original image indices
-                            int h_in = static_cast<int>(oh * stride + kh) - static_cast<int>(padding);
-                            int w_in = static_cast<int>(ow * stride + kw) - static_cast<int>(padding);
+                    for(size_t kh = 0; kh < kernel_size; ++kh){
+                        int h_in = static_cast<int>(oh * stride + kh) - static_cast<int>(padding);
 
-                            size_t dest_flat_idx = curr_row * col_cols + curr_col;
-
-                            // virtual zero-padding boundary check conditional
-                            if (h_in >= 0 && h_in < static_cast<int>(in_h) && 
-                                w_in >= 0 && w_in < static_cast<int>(in_w)) {
-                                
-                                // calculate the flat contiguous index from the 4D input
-                                size_t src_flat_idx = b * (in_channels * in_h * in_w) + 
-                                                      ci * (in_h * in_w) + 
-                                                      static_cast<size_t>(h_in) * in_w + 
-                                                      static_cast<size_t>(w_in);
-                                                      
-                                col_matrix[dest_flat_idx] = (*input->data)[src_flat_idx];
-                            } else {
-                                col_matrix[dest_flat_idx] = 0.0; // padding element
+                        // hoist height check outside the innermost loop to prevent branch mispredictions
+                        if (h_in >= 0 && h_in < static_cast<int>(in_h)) {
+                            size_t src_row_offset = src_channel_offset + static_cast<size_t>(h_in) * in_w;
+                            
+                            for(size_t kw = 0; kw < kernel_size; ++kw){
+                                int w_in = static_cast<int>(ow * stride + kw) - static_cast<int>(padding);
+                                if (w_in >= 0 && w_in < static_cast<int>(in_w)) {
+                                    local_col_ptr[write_idx++] = input_ptr[src_row_offset + static_cast<size_t>(w_in)];
+                                } else {
+                                    local_col_ptr[write_idx++] = 0.0;
+                                }
+                            }
+                        } else {
+                            // fill complete padded rows with zero instantly
+                            for(size_t kw = 0; kw < kernel_size; ++kw){
+                                local_col_ptr[write_idx++] = 0.0;
                             }
                         }
                     }
@@ -93,42 +99,44 @@ std::vector<double> Conv2D::im2col(const TensorPtr& input, size_t out_h, size_t 
 // aggregate 2d column matrix values back into a 4d target image gradient array
 void Conv2D::col2im(const std::vector<double>& col_grad, const TensorPtr& input_grad, size_t out_h, size_t out_w) const {
     size_t batch_size = input_grad->shape[0];
-    size_t in_c = input_grad->shape[1];
     size_t in_h = input_grad->shape[2];
     size_t in_w = input_grad->shape[3];
 
     size_t col_cols = in_channels * kernel_size * kernel_size;
 
-    // clean canvas for gradient accumulation
     std::fill(input_grad->grad->begin(), input_grad->grad->end(), 0.0);
+    double* grad_ptr = input_grad->grad->data();
+    const double* col_grad_ptr = col_grad.data();
 
-    for(size_t b {0}; b < batch_size; ++b){
-        for(size_t oh {0}; oh < out_h; ++oh){
-            for(size_t ow {0}; ow < out_w; ++ow){
-                //compute the active destination row offset
-                size_t curr_row = (b * out_h * out_w) + (oh * out_w) + ow;
+    size_t img_stride = in_channels * in_h * in_w;
+    size_t ch_stride = in_h * in_w;
 
-                for(size_t ci {0}; ci < in_channels; ++ci){
-                    for(size_t kh {0}; kh < kernel_size; ++kh){
-                        for(size_t kw {0}; kw < kernel_size; ++kw){
-                            // calculate the current column displacement within this row
-                            size_t curr_col = (ci * kernel_size * kernel_size) + (kh * kernel_size) + kw;
-                            int h_in = static_cast<int>(oh * stride + kh) - static_cast<int>(padding);
-                            int w_in = static_cast<int>(ow * stride + kw) - static_cast<int>(padding);
+    #pragma omp parallel for collapse(2) schedule(static)
+    for(size_t b = 0; b < batch_size; ++b){
+        for(size_t ci = 0; ci < in_channels; ++ci){
+            size_t dest_channel_offset = b * img_stride + ci * ch_stride;
 
-                            size_t src_flat_idx = curr_row * col_cols + curr_col;
+            for(size_t oh = 0; oh < out_h; ++oh){
+                for(size_t ow = 0; ow < out_w; ++ow){
+                    // compute the active destination row offset
+                    size_t curr_row = (b * out_h * out_w) + (oh * out_w) + ow;
 
-                            // filter out padding boundaries during backward reassembly
-                            if (h_in >= 0 && h_in < static_cast<int>(in_h) && 
-                                w_in >= 0 && w_in < static_cast<int>(in_w)) {
-                                
-                                size_t dest_flat_idx = b * (in_channels * in_h * in_w) + 
-                                                       ci * (in_h * in_w) + 
-                                                       static_cast<size_t>(h_in) * in_w + 
-                                                       static_cast<size_t>(w_in);
-                                                       
-                                // accumulate gradients into matching coordinates
-                                (*input_grad->grad)[dest_flat_idx] += col_grad[src_flat_idx];
+                    const double* local_col_grad_row = col_grad_ptr + (curr_row * col_cols);
+                    size_t col_channel_offset = ci * kernel_size * kernel_size;
+
+                    for(size_t kh = 0; kh < kernel_size; ++kh){
+                        int h_in = static_cast<int>(oh * stride + kh) - static_cast<int>(padding);
+
+                        if (h_in >= 0 && h_in < static_cast<int>(in_h)) {
+                            size_t dest_row_offset = dest_channel_offset + static_cast<size_t>(h_in) * in_w;
+                            size_t col_row_offset = col_channel_offset + kh * kernel_size;
+
+                            for(size_t kw = 0; kw < kernel_size; ++kw){
+                                int w_in = static_cast<int>(ow * stride + kw) - static_cast<int>(padding);
+                                if (w_in >= 0 && w_in < static_cast<int>(in_w)) {
+                                    grad_ptr[dest_row_offset + static_cast<size_t>(w_in)] += 
+                                        local_col_grad_row[col_row_offset + kw];
+                                }
                             }
                         }
                     }
@@ -156,7 +164,7 @@ TensorPtr Conv2D::forward(const TensorPtr& input){
     // package unrolled parameters into a tracking graph node
     size_t col_rows = batch_size * out_h * out_w;
     size_t col_cols = in_channels * kernel_size * kernel_size;
-    auto input_col_tensor = std::make_shared<Tensor>(col_data, std::vector<size_t>{col_rows, col_cols}, std::vector<TensorPtr>{x}, "im2col");
+    auto input_col_tensor = std::make_shared<Tensor>(std::move(col_data), std::vector<size_t>{col_rows, col_cols}, std::vector<TensorPtr>{x}, "im2col");
 
     // flatten weights parameters to 2D footprint using existing tool
     auto weights_2d = weight->view({static_cast<int>(out_channels), static_cast<int>(col_cols)});

@@ -272,6 +272,7 @@ int main() {
     test_sequential_mlp_adam_convergence();
     test_vision_modules_autograd();
     test_batchnorm2d_autograd_and_inference();
+    test_average_pooling_autograd();
 
     std::cout << "----------------------------------------\n";
     std::cout << "[PASS] all neural network tests passed cleanly\n";
