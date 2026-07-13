@@ -12,6 +12,7 @@
 #include "optim/SGD.h"
 #include "optim/Adam.h"
 #include "utils/RNG.h"
+#include "nn/AvgPool2D.h"
 
 // helper to assert floating point parity
 bool close_enough(double a, double b, double tol = 1e-5) {
@@ -221,6 +222,44 @@ void test_batchnorm2d_autograd_and_inference() {
     auto out_eval = bn->forward(X);
     assert(out_eval->shape == X->shape);
     std::cout << "[PASS] BatchNorm2D frozen evaluation inference completed cleanly\n\n";
+}
+
+void test_average_pooling_autograd() {
+    std::cout << "Running AveragePool2D Autograd Verification Test...\n";
+
+    // Synthetic Image Frame: B=1, C=1, H=4, W=4
+    std::vector<double> img_vals = {
+        2.0, 4.0, 8.0, 16.0,
+        4.0, 6.0, 2.0, 0.0,
+        1.0, 3.0, 5.0, 7.0,
+        9.0, 7.0, 5.0, 3.0
+    };
+    auto X = std::make_shared<Tensor>(img_vals, std::vector<size_t>{1, 1, 4, 4}, true);
+
+    // Instantiate AveragePool2D: Kernel=2, Stride=2
+    auto avg_pool = std::make_shared<AvgPool2D>(2, 2);
+    auto out = avg_pool->forward(X);
+
+    // Verify spatial grid resolution downsampling maps ({1, 1, 4, 4} -> {1, 1, 2, 2})
+    assert(out->shape[0] == 1 && out->shape[1] == 1 && out->shape[2] == 2 && out->shape[3] == 2);
+
+    // Verify exact analytical forward values for top-left window block: (2+4+4+6)/4 = 4.0
+    assert(close_enough((*out->data)[0], 4.0));
+    std::cout << "[PASS] AvgPool2D mapping values match analytical expectations\n";
+
+    // Run backpropagation sweep utilizing non-uniform scale variables
+    auto loss = (out * out)->sum();
+    loss->backward();
+
+    // Verify gradient propagation reached original input layer matrix entries
+    assert(X->grad != nullptr);
+    
+    // For out[0] = 4.0, dLoss/dOut[0] = 2 * 4.0 = 8.0
+    // dLoss/dX elements in window[0] = 8.0 / 4 = 2.0
+    assert(close_enough((*X->grad)[0], 2.0));
+    assert(close_enough((*X->grad)[1], 2.0));
+
+    std::cout << "[PASS] AveragePool2D derivative backpropagation equations verified successfully\n\n";
 }
 
 int main() {

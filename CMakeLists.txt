@@ -40,6 +40,7 @@ add_executable(autograd_main
     src/nn/Loss.cpp
     src/nn/Conv2D.cpp
     src/nn/MaxPool2D.cpp
+    src/nn/AvgPool2D.cpp
     src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )
@@ -55,6 +56,7 @@ pybind11_add_module(autograd_cpp
     src/nn/Loss.cpp
     src/nn/Conv2D.cpp
     src/nn/MaxPool2D.cpp
+    src/nn/AvgPool2D.cpp
     src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )

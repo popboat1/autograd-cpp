@@ -13,6 +13,7 @@
 #include "nn/Loss.h"
 #include "utils/RNG.h"
 #include "nn/BatchNorm2D.h"
+#include "nn/AvgPool2D.h"
 
 namespace py = pybind11;
 
@@ -164,6 +165,10 @@ PYBIND11_MODULE(autograd_cpp, m) {
              py::arg("stride") = 1, py::arg("padding") = 0);
 
     py::class_<MaxPool2D, Module, std::shared_ptr<MaxPool2D>>(m, "MaxPool2D")
+        .def(py::init<size_t, size_t>(),
+             py::arg("kernel_size"), py::arg("stride") = 2);
+    
+    py::class_<AvgPool2D, Module, std::shared_ptr<AvgPool2D>>(m, "AveragePool2D")
         .def(py::init<size_t, size_t>(),
              py::arg("kernel_size"), py::arg("stride") = 2);
 
