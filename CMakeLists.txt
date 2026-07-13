@@ -32,28 +32,30 @@ FetchContent_MakeAvailable(pybind11)
 
 add_executable(autograd_main
     src/main.cpp
+    src/autograd/Tensor.cpp
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
     src/optim/Adam.cpp
     src/nn/Loss.cpp
-    src/autograd/Tensor.cpp
     src/nn/Conv2D.cpp
     src/nn/MaxPool2D.cpp
+    src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )
 
 # compile to python library
 pybind11_add_module(autograd_cpp 
     src/autograd/bindings.cpp
+    src/autograd/Tensor.cpp
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
     src/optim/Adam.cpp
     src/nn/Loss.cpp
-    src/autograd/Tensor.cpp
     src/nn/Conv2D.cpp
     src/nn/MaxPool2D.cpp
+    src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )
 

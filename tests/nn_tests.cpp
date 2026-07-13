@@ -7,6 +7,7 @@
 #include "nn/Conv2D.h"
 #include "nn/MaxPool2D.h"
 #include "nn/Sequential.h"
+#include "nn/BatchNorm2D.h"
 #include "nn/Loss.h"
 #include "optim/SGD.h"
 #include "optim/Adam.h"
@@ -168,6 +169,60 @@ void test_sequential_mlp_adam_convergence() {
     std::cout << "[PASS] Adam adaptive optimization step adjustments verified successfully\n\n";
 }
 
+void test_batchnorm2d_autograd_and_inference() {
+    std::cout << "Running BatchNorm2D Autograd & Inference Test...\n";
+
+    // Synthetic 4D Tensor Batch Layout: B=2, C=2, H=2, W=2
+    std::vector<double> X_vals = {
+        1.0, 2.0, 3.0, 4.0,  // B=0, C=0
+        5.0, 6.0, 7.0, 8.0,  // B=0, C=1
+        2.0, 3.0, 4.0, 5.0,  // B=1, C=0
+        6.0, 7.0, 8.0, 9.0   // B=1, C=1
+    };
+    auto X = std::make_shared<Tensor>(X_vals, std::vector<size_t>{2, 2, 2, 2}, true);
+
+    // Instantiate BatchNorm2D targeting 2 input features
+    auto bn = std::make_shared<BatchNorm2D>(2, 1e-5, 0.1, true, true);
+    assert(bn->training == true);
+
+    // Execute forward pass under training criteria
+    auto out = bn->forward(X);
+
+    // Validate spatial shape configuration preservation
+    assert(out->shape == X->shape);
+    std::cout << "[PASS] BatchNorm2D structural spatial dimensions preserved perfectly\n";
+
+    // Validate non-differentiable tracking stats updates (EMA updates buffers away from 0 and 1)
+    assert((*bn->running_mean->data)[0] != 0.0 || (*bn->running_mean->data)[1] != 0.0);
+    assert((*bn->running_var->data)[0] != 1.0 || (*bn->running_var->data)[1] != 1.0);
+    std::cout << "[PASS] BatchNorm2D non-differentiable moving tracking updates active\n";
+
+    // Validate automated primitive backpropagation routing
+    auto loss = (out * out)->sum();
+    loss->backward();
+
+    assert(bn->weight->grad != nullptr);
+    assert(bn->bias->grad != nullptr);
+    assert(X->grad != nullptr);
+
+    double weight_grad_sum = 0.0;
+    for (double g : *bn->weight->grad) weight_grad_sum += std::abs(g);
+    assert(weight_grad_sum > 0.0);
+
+    double input_grad_sum = 0.0;
+    for (double g : *X->grad) input_grad_sum += std::abs(g);
+    assert(input_grad_sum > 0.0);
+    std::cout << "[PASS] BatchNorm2D automated primitive autograd path successfully verified\n";
+
+    // Validate evaluation phase inference mechanics
+    bn->training = false;
+    X->zero_grad();
+
+    auto out_eval = bn->forward(X);
+    assert(out_eval->shape == X->shape);
+    std::cout << "[PASS] BatchNorm2D frozen evaluation inference completed cleanly\n\n";
+}
+
 int main() {
     std::cout << "starting neural network integration tests\n";
     std::cout << "----------------------------------------\n";
@@ -177,6 +232,7 @@ int main() {
     test_sequential_mlp_convergence();
     test_sequential_mlp_adam_convergence();
     test_vision_modules_autograd();
+    test_batchnorm2d_autograd_and_inference();
 
     std::cout << "----------------------------------------\n";
     std::cout << "[PASS] all neural network tests passed cleanly\n";

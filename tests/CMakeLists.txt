@@ -17,6 +17,7 @@ add_executable(nn_tests
     ${CMAKE_SOURCE_DIR}/src/optim/Adam.cpp
     ${CMAKE_SOURCE_DIR}/src/nn/Conv2D.cpp
     ${CMAKE_SOURCE_DIR}/src/nn/MaxPool2D.cpp
+    ${CMAKE_SOURCE_DIR}/src/nn/BatchNorm2D.cpp
     ${CMAKE_SOURCE_DIR}/src/nn/Sequential.cpp
 )
 add_test(NAME NNIntegrationTest COMMAND nn_tests)
