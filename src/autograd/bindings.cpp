@@ -1,6 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/operators.h>
+#include <pybind11/numpy.h>
 #include "autograd/Tensor.h"
 #include "nn/Module.h"
 #include "nn/Linear.h"
@@ -54,23 +55,35 @@ PYBIND11_MODULE(autograd_cpp, m) {
     // TENSOR BINDINGS
     // ----------------------------------------------------
     py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")
-        .def(py::init<std::vector<double>, std::vector<size_t>, bool>(), 
-             py::arg("values"), py::arg("shape"), py::arg("requires_grad") = true)
+        .def(py::init([](py::array_t<double> values, std::vector<size_t> shape, bool requires_grad) {
+            py::buffer_info info = values.request();
+            double* ptr = static_cast<double*>(info.ptr);
+            std::vector<double> v(ptr, ptr + info.size);
+            return std::make_shared<Tensor>(v, shape, requires_grad);
+        }), py::arg("values"), py::arg("shape"), py::arg("requires_grad") = true)
         .def_property("data",
-            [](const TensorPtr& t) { return *t->data; }, // getter
-            [](TensorPtr& t, std::vector<double> v) { *t->data = v; } // setter
+            [](const TensorPtr& t) -> py::array_t<double> { 
+                return py::array_t<double>(t->data->size(), t->data->data(), py::cast(t)); 
+            }, // getter
+            [](TensorPtr& t, py::array_t<double> v) { 
+                py::buffer_info info = v.request();
+                double* ptr = static_cast<double*>(info.ptr);
+                std::memcpy(t->data->data(), ptr, info.size * sizeof(double));
+            } // setter
         )
         .def_property("grad",
-            [](const TensorPtr& t) { 
+            [](const TensorPtr& t) -> py::array_t<double> { 
                 // allocate zero-filled gradient buffer if it does not exist yet
                 t->ensure_grad_allocated(); 
-                return *t->grad; 
+                return py::array_t<double>(t->grad->size(), t->grad->data(), py::cast(t)); 
             },
-            [](TensorPtr& t, std::vector<double> v) { 
-                // allocate gradient buffer before copying values from python list
+            [](TensorPtr& t, py::array_t<double> v) { 
+                // allocate gradient buffer before copying values from numpy array
                 t->ensure_grad_allocated(); 
-                *t->grad = v; 
-                }
+                py::buffer_info info = v.request();
+                double* ptr = static_cast<double*>(info.ptr);
+                std::memcpy(t->grad->data(), ptr, info.size * sizeof(double));
+            }
         )
         .def_readonly("shape", &Tensor::shape)
         .def_readonly("strides", &Tensor::strides)
