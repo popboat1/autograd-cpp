@@ -36,16 +36,22 @@ std::vector<TensorPtr> Conv2D::parameters() const {
 // im2col
 // unroll 4d tensor patches into a row-major 2D column matrix vector
 // parallelized using linear pointer tracking and branch-hoisting padding
-std::vector<double> Conv2D::im2col(const TensorPtr& input, size_t out_h, size_t out_w) const {
+std::shared_ptr<std::vector<double>> Conv2D::im2col(const TensorPtr& input, size_t out_h, size_t out_w) const {
     size_t batch_size = input->shape[0];
     size_t in_h = input->shape[2];
     size_t in_w = input->shape[3];
 
     size_t col_rows = batch_size * out_h * out_w;
     size_t col_cols = in_channels * kernel_size * kernel_size;
+    size_t required_size = col_rows * col_cols;
     
-    std::vector<double> col_matrix(col_rows * col_cols);
-    double* col_ptr = col_matrix.data();
+    if (!col_matrix) {
+        col_matrix = std::make_shared<std::vector<double>>(required_size);
+    } else if (col_matrix->size() != required_size) {
+        col_matrix->resize(required_size);
+    }
+    
+    double* col_ptr = col_matrix->data();
     const double* input_ptr = input->data->data();
 
     size_t img_stride = in_channels * in_h * in_w;
@@ -159,12 +165,12 @@ TensorPtr Conv2D::forward(const TensorPtr& input){
     size_t out_h = ((in_h - kernel_size + 2 * padding) / stride) + 1;
     size_t out_w = ((in_w - kernel_size + 2 * padding) / stride) + 1;
 
-    std::vector<double> col_data = im2col(x, out_h, out_w);
+    auto col_data_ptr = im2col(x, out_h, out_w);
 
     // package unrolled parameters into a tracking graph node
     size_t col_rows = batch_size * out_h * out_w;
     size_t col_cols = in_channels * kernel_size * kernel_size;
-    auto input_col_tensor = std::make_shared<Tensor>(std::move(col_data), std::vector<size_t>{col_rows, col_cols}, std::vector<TensorPtr>{x}, "im2col");
+    auto input_col_tensor = std::make_shared<Tensor>(col_data_ptr, nullptr, std::vector<size_t>{col_rows, col_cols}, std::vector<TensorPtr>{x}, "im2col");
 
     // flatten weights parameters to 2D footprint using existing tool
     auto weights_2d = weight->view({static_cast<int>(out_channels), static_cast<int>(col_cols)});

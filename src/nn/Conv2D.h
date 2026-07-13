@@ -7,7 +7,9 @@
 
 class Conv2D : public Module, public std::enable_shared_from_this<Conv2D> {
 private:
-    std::vector<double> im2col(
+    mutable std::shared_ptr<std::vector<double>> col_matrix;
+
+    std::shared_ptr<std::vector<double>> im2col(
         const TensorPtr& input, 
         size_t out_h, 
         size_t out_w
