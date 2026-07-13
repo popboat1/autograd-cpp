@@ -1,12 +1,34 @@
 cmake_minimum_required(VERSION 3.15)
 project(CppMLFramework LANGUAGES CXX)
 
-# trigger GitHub linguist recalculation
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# compiler optim flags
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+endif()
+
+if(MSVC)
+    add_compile_options(/O2 /Oi /Ot /GL)
+else()
+    add_compile_options(-O3 -march=native -ffast-math)
+endif()
+
+# enable link-time optimization
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported OUTPUT error)
+if(ipo_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    message(STATUS "Link-Time Optimization (LTO) enabled for Release builds")
+endif()
+
+# multi threading with openmp
+find_package(OpenMP REQUIRED)
+
 # silence deprecation warnings triggered by third-party libraries
 set(CMAKE_WARN_DEPRECATED OFF CACHE BOOL "" FORCE)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
@@ -44,6 +66,7 @@ add_executable(autograd_main
     src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )
+target_link_libraries(autograd_main PRIVATE OpenMP::OpenMP_CXX)
 
 # compile to python library
 pybind11_add_module(autograd_cpp 
@@ -60,8 +83,8 @@ pybind11_add_module(autograd_cpp
     src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )
-
 target_link_options(autograd_cpp PRIVATE "-static-libgcc" "-static-libstdc++")
+target_link_libraries(autograd_cpp PRIVATE OpenMP::OpenMP_CXX)
 
 set_target_properties(autograd_cpp PROPERTIES 
     PREFIX ""
