@@ -219,10 +219,17 @@ TensorPtr Tensor::contiguous() {
     for (size_t s : shape) total_elements *= s;
     
     std::vector<double> contiguous_values(total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-    for (size_t i = 0; i < total_elements; ++i) {
-        contiguous_values[i] = (*data)[get_flat_index(coords)];
-        advance_coordinates(coords, shape);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
+        contiguous_values[i] = (*data)[flat_idx];
     }
     
     auto out = std::make_shared<Tensor>(contiguous_values, shape, std::vector<TensorPtr>{shared_from_this()}, "contiguous");
@@ -250,10 +257,17 @@ TensorPtr Tensor::add_(const TensorPtr& other) {
         for (size_t s : shape) total_elements *= s;
         
         std::vector<double> contiguous_values(total_elements);
-        std::vector<size_t> coords(shape.size(), 0);
-        for (size_t i = 0; i < total_elements; ++i) {
-            contiguous_values[i] = (*data)[get_flat_index(coords)];
-            advance_coordinates(coords, shape);
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_idx = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % shape[d];
+                flat_idx += coord * strides[d];
+                temp /= shape[d];
+            }
+            contiguous_values[i] = (*data)[flat_idx];
         }
         
         data = std::make_shared<std::vector<double>>(contiguous_values);
@@ -280,13 +294,21 @@ TensorPtr Tensor::add_(const TensorPtr& other) {
             throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
         }
         
-        std::vector<size_t> coords(out_shape.size(), 0);
         size_t total_elements = data->size();
-        for (size_t i = 0; i < total_elements; ++i) {
-            size_t flat_lhs = get_flat_index_from_broadcast(coords, lhs_b_strides);
-            size_t flat_rhs = get_flat_index_from_broadcast(coords, rhs_b_strides);
+        
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0;
+            size_t flat_rhs = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
             (*data)[flat_lhs] += (*other->data)[flat_rhs];
-            advance_coordinates(coords, out_shape);
         }
     }
     return shared_from_this();
@@ -300,10 +322,17 @@ TensorPtr Tensor::sub_(const TensorPtr& other) {
         for (size_t s : shape) total_elements *= s;
         
         std::vector<double> contiguous_values(total_elements);
-        std::vector<size_t> coords(shape.size(), 0);
-        for (size_t i = 0; i < total_elements; ++i) {
-            contiguous_values[i] = (*data)[get_flat_index(coords)];
-            advance_coordinates(coords, shape);
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_idx = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % shape[d];
+                flat_idx += coord * strides[d];
+                temp /= shape[d];
+            }
+            contiguous_values[i] = (*data)[flat_idx];
         }
         
         data = std::make_shared<std::vector<double>>(contiguous_values);
@@ -330,13 +359,21 @@ TensorPtr Tensor::sub_(const TensorPtr& other) {
             throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
         }
         
-        std::vector<size_t> coords(out_shape.size(), 0);
         size_t total_elements = data->size();
-        for (size_t i = 0; i < total_elements; ++i) {
-            size_t flat_lhs = get_flat_index_from_broadcast(coords, lhs_b_strides);
-            size_t flat_rhs = get_flat_index_from_broadcast(coords, rhs_b_strides);
+        
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0;
+            size_t flat_rhs = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
             (*data)[flat_lhs] -= (*other->data)[flat_rhs];
-            advance_coordinates(coords, out_shape);
         }
     }
     return shared_from_this();
@@ -366,15 +403,19 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
     std::vector<double> out_values(total_elements, 0.0);
 
     // forward pass
-    std::vector<size_t> current_idx(out_shape.size(), 0);
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
-        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
-        
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % out_shape[d];
+            flat_lhs += coord * lhs_b_strides[d];
+            flat_rhs += coord * rhs_b_strides[d];
+            temp /= out_shape[d];
+        }
         out_values[i] = (*lhs->data)[flat_lhs] + (*rhs->data)[flat_rhs];
-        
-        // advance the coordinate system to the next spatial block
-        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
     // construct graph node
@@ -423,15 +464,19 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
     std::vector<double> out_values(total_elements, 0.0);
 
     // forward pass
-    std::vector<size_t> current_idx(out_shape.size(), 0);
-    for(size_t i {0}; i < total_elements; ++i){
-        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
-        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
-
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % out_shape[d];
+            flat_lhs += coord * lhs_b_strides[d];
+            flat_rhs += coord * rhs_b_strides[d];
+            temp /= out_shape[d];
+        }
         out_values[i] = (*lhs->data)[flat_lhs] - (*rhs->data)[flat_rhs];
-
-        // advance the coordinate system to the next spatial block
-        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
     // construct graph node
@@ -480,15 +525,19 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
     std::vector<double> out_values(total_elements, 0.0);
 
     // forward pass
-    std::vector<size_t> current_idx(out_shape.size(), 0);
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
-        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
-        
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % out_shape[d];
+            flat_lhs += coord * lhs_b_strides[d];
+            flat_rhs += coord * rhs_b_strides[d];
+            temp /= out_shape[d];
+        }
         out_values[i] = (*lhs->data)[flat_lhs] * (*rhs->data)[flat_rhs];
-        
-        // advance the coordinate system to the next spatial block
-        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
     auto out = std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{lhs, rhs}, "*");
@@ -521,12 +570,17 @@ TensorPtr operator*(const TensorPtr& lhs, double rhs) {
     for (size_t s : lhs->shape) total_elements *= s;
 
     std::vector<double> out_values(total_elements);
-    std::vector<size_t> coords(lhs->shape.size(), 0);
-    
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_idx = lhs->get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(lhs->shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % lhs->shape[d];
+            flat_idx += coord * lhs->strides[d];
+            temp /= lhs->shape[d];
+        }
         out_values[i] = (*lhs->data)[flat_idx] * rhs;
-        Tensor::advance_coordinates(coords, lhs->shape);
     }
 
     auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::vector<TensorPtr>{lhs}, "*");
@@ -569,15 +623,20 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
     std::vector<double> out_values(total_elements, 0.0);
 
     // forward pass
-    std::vector<size_t> current_idx(out_shape.size(), 0);
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
-        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
-        
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % out_shape[d];
+            flat_lhs += coord * lhs_b_strides[d];
+            flat_rhs += coord * rhs_b_strides[d];
+            temp /= out_shape[d];
+        }
         // standard element-wise division
         out_values[i] = (*lhs->data)[flat_lhs] / (*rhs->data)[flat_rhs];
-        
-        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
     auto out = std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{lhs, rhs}, "/");
@@ -907,13 +966,18 @@ TensorPtr Tensor::relu(){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals(total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for(size_t i {0}; i < total_elements; ++i){
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         out_vals[i] = (*data)[flat_idx] > 0.0 ? (*data)[flat_idx] : 0.0;
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "relu");
@@ -944,13 +1008,18 @@ TensorPtr Tensor::exp(){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals(total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for(size_t i {0}; i < total_elements; ++i){
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         out_vals[i] = std::exp((*data)[flat_idx]);
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "exp");
@@ -980,13 +1049,18 @@ TensorPtr Tensor::tanh(){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals (total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for(size_t i {0}; i < total_elements; ++i){
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         out_vals[i] = std::tanh((*data)[flat_idx]);
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "tanh");
@@ -1018,13 +1092,18 @@ TensorPtr Tensor::sigmoid(){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals(total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for(size_t i {0}; i < total_elements; ++i){
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         out_vals[i] = 1.0 / (1.0 + std::exp(-(*data)[flat_idx]));
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "sigmoid");
@@ -1055,13 +1134,18 @@ TensorPtr Tensor::log(){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals(total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for(size_t i {0}; i < total_elements; ++i){
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         out_vals[i] = std::log((*data)[flat_idx]);
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "log");
@@ -1091,13 +1175,18 @@ TensorPtr Tensor::pow(double exponent){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals (total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for(size_t i = 0; i < total_elements; ++i){
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         out_vals[i] = std::pow((*data)[flat_idx], exponent);
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "pow");
@@ -1596,12 +1685,19 @@ TensorPtr operator==(const Tensor& lhs, const Tensor& rhs) {
     for (size_t dim : out_shape) total_elements *= dim;
     std::vector<double> out_values(total_elements);
 
-    std::vector<size_t> current_idx(out_shape.size(), 0);
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
-        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % out_shape[d];
+            flat_lhs += coord * lhs_b_strides[d];
+            flat_rhs += coord * rhs_b_strides[d];
+            temp /= out_shape[d];
+        }
         out_values[i] = ((*lhs.data)[flat_lhs] == (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
-        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
     return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, "==");
@@ -1624,12 +1720,19 @@ TensorPtr operator<(const Tensor& lhs, const Tensor& rhs) {
     for (size_t dim : out_shape) total_elements *= dim;
     std::vector<double> out_values(total_elements);
 
-    std::vector<size_t> current_idx(out_shape.size(), 0);
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
-        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % out_shape[d];
+            flat_lhs += coord * lhs_b_strides[d];
+            flat_rhs += coord * rhs_b_strides[d];
+            temp /= out_shape[d];
+        }
         out_values[i] = ((*lhs.data)[flat_lhs] < (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
-        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
     return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, "<");
@@ -1652,12 +1755,19 @@ TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
     for (size_t dim : out_shape) total_elements *= dim;
     std::vector<double> out_values(total_elements);
 
-    std::vector<size_t> current_idx(out_shape.size(), 0);
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_lhs = Tensor::get_flat_index_from_broadcast(current_idx, lhs_b_strides);
-        size_t flat_rhs = Tensor::get_flat_index_from_broadcast(current_idx, rhs_b_strides);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % out_shape[d];
+            flat_lhs += coord * lhs_b_strides[d];
+            flat_rhs += coord * rhs_b_strides[d];
+            temp /= out_shape[d];
+        }
         out_values[i] = ((*lhs.data)[flat_lhs] > (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
-        Tensor::advance_coordinates(current_idx, out_shape);
     }
 
     return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, ">");
@@ -1668,16 +1778,21 @@ TensorPtr Tensor::sqrt(){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals(total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         if ((*data)[flat_idx] < 0.0) {
             throw std::runtime_error("sqrt: cannot calculate square root of a negative value");
         }
         out_vals[i] = std::sqrt((*data)[flat_idx]);
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "sqrt");
@@ -1713,13 +1828,18 @@ TensorPtr Tensor::neg(){
     for (size_t s : shape) total_elements *= s;
 
     std::vector<double> out_vals(total_elements);
-    std::vector<size_t> coords(shape.size(), 0);
-
     // forward pass
-    for (size_t i = 0; i < total_elements; ++i) {
-        size_t flat_idx = get_flat_index(coords);
+    // stateless coordinate resolution for safe parallelization
+    #pragma omp parallel for
+    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        size_t flat_idx = 0;
+        size_t temp = i;
+        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
+            size_t coord = temp % shape[d];
+            flat_idx += coord * strides[d];
+            temp /= shape[d];
+        }
         out_vals[i] = -(*data)[flat_idx];
-        advance_coordinates(coords, shape);
     }
 
     auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "neg");
