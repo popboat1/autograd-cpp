@@ -30,10 +30,10 @@ TensorPtr AvgPool2D::forward(const TensorPtr& input) {
     double window_area = static_cast<double>(kernel_size * kernel_size);
 
     #pragma omp parallel for collapse(2)
-    for(size_t b {0}; b < batch_size; ++b){
-        for(size_t ci {0}; ci < in_c; ++ci){
-            for(size_t oh {0}; oh < out_h; ++oh){
-                for(size_t ow {0}; ow < out_w; ++ow){
+    for(size_t b = 0; b < batch_size; ++b){
+        for(size_t ci = 0; ci < in_c; ++ci){
+            for(size_t oh = 0; oh < out_h; ++oh){
+                for(size_t ow = 0; ow < out_w; ++ow){
                     double sum_val = 0.0;
 
                     // accumulate continuous values across the sliding window footprint
