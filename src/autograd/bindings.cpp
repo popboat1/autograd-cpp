@@ -12,6 +12,7 @@
 #include "optim/Adam.h"
 #include "nn/Loss.h"
 #include "utils/RNG.h"
+#include "nn/BatchNorm2D.h"
 
 namespace py = pybind11;
 
@@ -176,6 +177,11 @@ PYBIND11_MODULE(autograd_cpp, m) {
              py::arg("fan_in"), 
              py::arg("hidden_sizes"), 
              py::arg("activation_layer") = "");
+            
+    py::class_<BatchNorm2D, Module, std::shared_ptr<BatchNorm2D>>(m, "BatchNorm2D")
+        .def(py::init<size_t, double, double, bool, bool>(),
+             py::arg("num_features"), py::arg("eps") = 1e-5, py::arg("momentum") = 0.1,
+             py::arg("affine") = true, py::arg("track_running_stats") = true);
     
     // ----------------------------------------------------
     // OPTIMIZER & LOSS BINDINGS
