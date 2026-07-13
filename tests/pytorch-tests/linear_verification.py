@@ -35,7 +35,7 @@ def run_layer_verification():
     x_cpp = autograd_cpp.Tensor(x_input_vals, [1, fan_in], True)
     
     # execute forward evaluation pass via c++ engine
-    out_cpp = linear_cpp.forward(x_cpp)
+    out_cpp = linear_cpp(x_cpp)
     
     # compute sum scalar loss to build the gradient tracking graph
     L_cpp = out_cpp.sum()

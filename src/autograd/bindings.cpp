@@ -152,6 +152,7 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("forward", &Module::forward)
         .def("parameters", &Module::parameters)
         .def("zero_grad", &Module::zero_grad)
+        .def("__call__", [](Module& self, const TensorPtr& input) { return self.forward(input); })
         .def("__setattr__", [](py::object self, const std::string& name, py::object value) {
             if (py::isinstance<Module>(value)) {
                 auto native_self = self.cast<std::shared_ptr<Module>>();

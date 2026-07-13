@@ -99,7 +99,7 @@ def test_mlp_inference():
         model = autograd_cpp.MLP(3, [4, 2, 1], "tanh")
         inputs = autograd_cpp.Tensor([1.0, -1.0, 0.5], [1, 3], False)
         
-        outputs = model.forward(inputs)
+        outputs = model(inputs)
         print(f"[success] mlp successfully generated forward tensor output shape configuration: {outputs.shape}")
         print(f"          output evaluation scalar: {outputs.data[0]:.4f}")
     except Exception as e:
