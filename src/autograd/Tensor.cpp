@@ -1921,15 +1921,17 @@ void Tensor::backward() {
     // snapshot historical gradients of intermediate nodes and clear them for this pass.
     // this ensures downstream layers receive only fresh current-pass updates (matching pytorch),
     // while allowing intermediate nodes to accumulate their user-facing totals at the end.
-    std::vector<TensorPtr> intermediate_nodes;
-    std::vector<std::shared_ptr<std::vector<double>>> old_grads;
+    std::vector<std::shared_ptr<std::vector<double>>> unique_grad_vectors;
+    std::vector<std::vector<double>> old_grads;
+    std::set<std::vector<double>*> cleared_buffers;
 
     for(auto& node : topo){
         if(node->requires_grad && !node->prev.empty() && node != shared_from_this()){
-            if(node->grad){
-                intermediate_nodes.push_back(node);
-                old_grads.push_back(std::move(node->grad)); // move out the pointer
-                node->grad = std::make_shared<std::vector<double>>(node->data->size(), 0.0); // zero allocation tracking buffer
+            if(node->grad && cleared_buffers.find(node->grad.get()) == cleared_buffers.end()){
+                cleared_buffers.insert(node->grad.get());
+                unique_grad_vectors.push_back(node->grad);
+                old_grads.push_back(*node->grad); // snapshot historical totals
+                std::fill(node->grad->begin(), node->grad->end(), 0.0); // clean pass reset
             }
         }
     }
@@ -1946,15 +1948,15 @@ void Tensor::backward() {
     }
 
     // accumulate downstream calculations back into historical tracking buffers
-    for(size_t k = 0; k < intermediate_nodes.size(); ++k){
-        auto& node = intermediate_nodes[k];
-        const auto& old_vector_ptr = old_grads[k];
-        double* current_grad = node->grad->data();
-        const double* old_grad_data = old_vector_ptr->data();
-        size_t grad_size = node->grad->size();
+    for(size_t k = 0; k < unique_grad_vectors.size(); ++k){
+        auto& grad_vec = unique_grad_vectors[k];
+        const auto& old_vector = old_grads[k];
+        double* grad_data = grad_vec->data();
+        const double* old_data = old_vector.data();
+        size_t vec_size = grad_vec->size();
 
-        for(size_t i = 0; i < grad_size; ++i){
-            current_grad[i] += old_grad_data[i];
+        for(size_t i = 0; i < vec_size; ++i){
+            grad_data[i] += old_data[i];
         }
     }
 }
