@@ -1918,19 +1918,13 @@ void Tensor::backward() {
         }
     }
 
-    // snapshot historical gradients of intermediate nodes and clear them for this pass.
-    // this ensures downstream layers receive only fresh current-pass updates (matching pytorch),
-    // while allowing intermediate nodes to accumulate their user-facing totals at the end.
-    std::vector<std::shared_ptr<std::vector<double>>> unique_grad_vectors;
-    std::vector<std::vector<double>> old_grads;
+    // clear gradients of intermediate nodes for this pass
     std::set<std::vector<double>*> cleared_buffers;
 
     for(auto& node : topo){
         if(node->requires_grad && !node->prev.empty() && node != shared_from_this()){
             if(node->grad && cleared_buffers.find(node->grad.get()) == cleared_buffers.end()){
                 cleared_buffers.insert(node->grad.get());
-                unique_grad_vectors.push_back(node->grad);
-                old_grads.push_back(*node->grad); // snapshot historical totals
                 std::fill(node->grad->begin(), node->grad->end(), 0.0); // clean pass reset
             }
         }
@@ -1944,19 +1938,6 @@ void Tensor::backward() {
     for(auto it = topo.rbegin(); it != topo.rend(); ++it){
         if ((*it)->requires_grad){
             (*it)->backward_func();
-        }
-    }
-
-    // accumulate downstream calculations back into historical tracking buffers
-    for(size_t k = 0; k < unique_grad_vectors.size(); ++k){
-        auto& grad_vec = unique_grad_vectors[k];
-        const auto& old_vector = old_grads[k];
-        double* grad_data = grad_vec->data();
-        const double* old_data = old_vector.data();
-        size_t vec_size = grad_vec->size();
-
-        for(size_t i = 0; i < vec_size; ++i){
-            grad_data[i] += old_data[i];
         }
     }
 }
