@@ -64,6 +64,7 @@ TensorPtr SparseCategoricalCrossEntropyLoss::operator()(const TensorPtr& logits,
     std::vector<size_t> target_indices(batch_size);
     
     // extract log probabilities corresponding to the integer target indices
+    #pragma omp parallel for reduction(+:loss_sum)
     for (size_t b = 0; b < batch_size; ++b) {
         size_t target_idx = static_cast<size_t>((*targets->data)[b]);
         if (target_idx >= num_classes) {
@@ -86,6 +87,7 @@ TensorPtr SparseCategoricalCrossEntropyLoss::operator()(const TensorPtr& logits,
             if (log_probs->requires_grad) {
                 double upstream_grad = (*out_ptr->grad)[0];
                 double grad_scale = -1.0 / static_cast<double>(batch_size);
+                #pragma omp parallel for
                 for (size_t b = 0; b < batch_size; ++b) {
                     size_t flat_idx = b * num_classes + target_indices[b];
                     (*log_probs->grad)[flat_idx] += upstream_grad * grad_scale;

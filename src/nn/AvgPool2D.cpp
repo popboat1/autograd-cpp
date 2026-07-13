@@ -29,6 +29,7 @@ TensorPtr AvgPool2D::forward(const TensorPtr& input) {
 
     double window_area = static_cast<double>(kernel_size * kernel_size);
 
+    #pragma omp parallel for collapse(2)
     for(size_t b {0}; b < batch_size; ++b){
         for(size_t ci {0}; ci < in_c; ++ci){
             for(size_t oh {0}; oh < out_h; ++oh){
@@ -73,6 +74,7 @@ TensorPtr AvgPool2D::forward(const TensorPtr& input) {
 
                 double scale_factor = 1.0 / window_area;
 
+                #pragma omp parallel for collapse(2)
                 for (size_t b = 0; b < batch_size; ++b) {
                     for (size_t ci = 0; ci < in_c; ++ci) {
                         for (size_t oh = 0; oh < out_h; ++oh) {
