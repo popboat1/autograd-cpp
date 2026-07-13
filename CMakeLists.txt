@@ -88,9 +88,12 @@ target_link_libraries(autograd_cpp PRIVATE OpenMP::OpenMP_CXX)
 
 set_target_properties(autograd_cpp PROPERTIES 
     PREFIX ""
-    SUFFIX ".pyd"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
+
+if(WIN32)
+    set_target_properties(autograd_cpp PROPERTIES SUFFIX ".pyd")
+endif()
 
 enable_testing()
 add_subdirectory(tests)
