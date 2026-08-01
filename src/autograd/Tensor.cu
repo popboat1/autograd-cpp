@@ -93,8 +93,16 @@ void Tensor::to(Device target_device){
 
 // destructor
 Tensor::~Tensor(){
-    if (cuda_data) CUDA_CHECK(cudaFree(cuda_data));
-    if (cuda_grad) CUDA_CHECK(cudaFree(cuda_grad));
+    if (cuda_data) {
+        if (cudaFree(cuda_data) != cudaSuccess) {
+            std::cerr << "fatal error: Failed to free cuda data!" << std::endl;
+        }
+    }
+    if (cuda_grad) {
+        if (cudaFree(cuda_grad) != cudaSuccess) {
+            std::cerr << "fatal error: Failed to free cuda grad!" << std::endl;
+        }
+    }
 }
 
 

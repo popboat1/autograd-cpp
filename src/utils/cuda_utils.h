@@ -1,3 +1,6 @@
+#ifndef CUDA_UTILS_H
+#define CUDA_UTILS_H
+
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <string>
@@ -10,3 +13,5 @@
                                      " at " + __FILE__ + ":" + std::to_string(__LINE__)); \
         } \
     } while (0)
+
+#endif
