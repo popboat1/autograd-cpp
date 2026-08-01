@@ -6,7 +6,7 @@
 #include <functional>
 #include <string>
 
-#include "utils/cuda_utils.h"
+#include "utils/cuda_utils.cuh"
 
 class Tensor;
 using TensorPtr = std::shared_ptr<Tensor>;
@@ -105,6 +105,10 @@ public:
     bool is_contiguous() const;
     TensorPtr contiguous();
     void backward();
+
+    // functions to prevent double-free risk on GPU mem
+    Tensor(const Tensor&) = delete;
+    Tensor& operator=(const Tensor&) = delete;  
 
     // in-place mutators & encapsulated ops
     TensorPtr add_(const TensorPtr& other);

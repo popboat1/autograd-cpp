@@ -63,7 +63,7 @@ FetchContent_MakeAvailable(pybind11)
 
 add_executable(autograd_main
     src/main.cpp
-    src/autograd/Tensor.cpp
+    src/autograd/Tensor.cu
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp
@@ -80,7 +80,7 @@ target_link_libraries(autograd_main PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA
 # compile to python library
 pybind11_add_module(autograd_cpp 
     src/autograd/bindings.cpp
-    src/autograd/Tensor.cpp
+    src/autograd/Tensor.cu
     src/nn/Linear.cpp
     src/nn/MLP.cpp
     src/optim/SGD.cpp

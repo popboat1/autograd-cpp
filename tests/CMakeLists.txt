@@ -1,7 +1,7 @@
 # tensor engine unit tests
 add_executable(tensorgrad_tests
     tensorgrad_tests.cpp
-    ${CMAKE_SOURCE_DIR}/src/autograd/Tensor.cpp
+    ${CMAKE_SOURCE_DIR}/src/autograd/Tensor.cu
     ${CMAKE_SOURCE_DIR}/src/nn/Loss.cpp
 )
 add_test(NAME TensorGradMatrixTest COMMAND tensorgrad_tests)
@@ -10,7 +10,7 @@ target_link_libraries(tensorgrad_tests PRIVATE OpenMP::OpenMP_CXX CUDA::cublas C
 # neural nets & optims tests
 add_executable(nn_tests
     nn_tests.cpp
-    ${CMAKE_SOURCE_DIR}/src/autograd/Tensor.cpp
+    ${CMAKE_SOURCE_DIR}/src/autograd/Tensor.cu
     ${CMAKE_SOURCE_DIR}/src/nn/Linear.cpp
     ${CMAKE_SOURCE_DIR}/src/nn/MLP.cpp
     ${CMAKE_SOURCE_DIR}/src/nn/Loss.cpp

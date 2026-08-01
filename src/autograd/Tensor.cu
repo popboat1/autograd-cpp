@@ -233,6 +233,14 @@ Tensor::ReductionMeta Tensor::prepare_reduction_metadata(size_t dim, bool keepdi
 void Tensor::ensure_grad_allocated(){
     if(grad == nullptr){
         grad = (std::make_shared<std::vector<double>>(data->size(), 0.0));
+
+        // alloc in GPU if on GPU
+        if (device == Device::CUDA){
+            size_t bytes = data->size() * sizeof(double);
+            CUDA_CHECK(cudaMalloc(&cuda_grad, bytes));
+            // copy the zeros from cpu
+            CUDA_CHECK(cudaMemcpy(cuda_grad, grad->data(), bytes, cudaMemcpyHostToDevice));
+        }
     }
 }
 
