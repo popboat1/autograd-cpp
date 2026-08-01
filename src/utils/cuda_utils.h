@@ -14,4 +14,10 @@
         } \
     } while (0)
 
+namespace cuda_utils {
+    inline int ceil_div(int a, int b) { 
+        return (a + b - 1) / b; 
+    }
+}
+
 #endif
