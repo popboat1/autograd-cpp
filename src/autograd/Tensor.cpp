@@ -68,22 +68,22 @@ void Tensor::to(Device target_device){
 
     if(target_device == Device::CUDA){
         // cpu -> gpu
-        cudaMalloc(&cuda_data, bytes);
-        cudaMemcpy(cuda_data, data->data(), bytes, cudaMemcpyHostToDevice);
+        CUDA_CHECK(cudaMalloc(&cuda_data, bytes));
+        CUDA_CHECK(cudaMemcpy(cuda_data, data->data(), bytes, cudaMemcpyHostToDevice));
 
         if(grad){
-            cudaMalloc(&cuda_grad, bytes);
-            cudaMemcpy(cuda_grad, grad->data(), bytes, cudaMemcpyHostToDevice);
+            CUDA_CHECK(cudaMalloc(&cuda_grad, bytes));
+            CUDA_CHECK(cudaMemcpy(cuda_grad, grad->data(), bytes, cudaMemcpyHostToDevice));
         }
     } else if(target_device == Device::CPU){
         // gpu -> cpu
-        cudaMemcpy(data->data(), cuda_data, bytes, cudaMemcpyDeviceToHost);
-        cudaFree(cuda_data);
+        CUDA_CHECK(cudaMemcpy(data->data(), cuda_data, bytes, cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(cuda_data));
         cuda_data = nullptr;
 
         if(grad && cuda_grad){
-            cudaMemcpy(grad->data(), cuda_grad, bytes, cudaMemcpyDeviceToHost);
-            cudaFree(cuda_grad);
+            CUDA_CHECK(cudaMemcpy(grad->data(), cuda_grad, bytes, cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaFree(cuda_grad));
             cuda_grad = nullptr;
         }
     }
@@ -93,8 +93,8 @@ void Tensor::to(Device target_device){
 
 // destructor
 Tensor::~Tensor(){
-    if (cuda_data) cudaFree(cuda_data);
-    if (cuda_grad) cudaFree(cuda_grad);
+    if (cuda_data) CUDA_CHECK(cudaFree(cuda_data));
+    if (cuda_grad) CUDA_CHECK(cudaFree(cuda_grad));
 }
 
 
