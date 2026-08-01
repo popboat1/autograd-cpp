@@ -1,8 +1,17 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 project(CppMLFramework LANGUAGES CXX)
+
+enable_language(CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+set(CMAKE_CUDA_ARCHITECTURES 86)
+
+find_package(CUDAToolkit REQUIRED)
 
 # compiler optim flags
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -66,7 +75,7 @@ add_executable(autograd_main
     src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )
-target_link_libraries(autograd_main PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(autograd_main PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
 
 # compile to python library
 pybind11_add_module(autograd_cpp 
@@ -84,7 +93,7 @@ pybind11_add_module(autograd_cpp
     src/nn/Sequential.cpp
 )
 target_link_options(autograd_cpp PRIVATE "-static-libgcc" "-static-libstdc++")
-target_link_libraries(autograd_cpp PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(autograd_cpp PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
 
 set_target_properties(autograd_cpp PROPERTIES 
     PREFIX ""

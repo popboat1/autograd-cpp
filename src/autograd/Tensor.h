@@ -9,6 +9,11 @@
 class Tensor;
 using TensorPtr = std::shared_ptr<Tensor>;
 
+enum class Device{
+    CPU,
+    CUDA
+};
+
 class Tensor : public std::enable_shared_from_this<Tensor> {
 private:
     // computes broadcasted shapes and sets strides to 0 along stretched dimensions
@@ -53,6 +58,9 @@ public:
     std::vector<size_t> shape;
     std::vector<size_t> strides;
 
+    // device property
+    Device device = Device::CPU;
+
     // autograd properties
     bool requires_grad;
     std::string op;
@@ -60,18 +68,26 @@ public:
     std::function<void()> backward_func;
 
     // constructors
-    Tensor(std::vector<double> values, std::vector<size_t> shape, bool requires_grad = true);
+    // primary constructor
+    Tensor(std::vector<double> values, 
+           std::vector<size_t> shape, 
+           bool requires_grad = true,
+           Device device = Device::CPU);
+
+    // autograd node constructor
     Tensor(std::vector<double> values, 
            std::vector<size_t> shape, 
            std::vector<TensorPtr> children, 
-           std::string operation = "");
+           std::string operation = "",
+           Device device = Device::CPU);
     
     // internal zero-copy constructor
     Tensor(std::shared_ptr<std::vector<double>> shared_data, 
            std::shared_ptr<std::vector<double>> shared_grad, 
            std::vector<size_t> shape, 
            std::vector<TensorPtr> children, 
-           std::string operation = "");
+           std::string operation = "",
+           Device device = Device::CPU);
 
     // helper to map multidimensional index arrays to 1D flat storage offset
     size_t get_flat_index(const std::vector<size_t>& indices) const;

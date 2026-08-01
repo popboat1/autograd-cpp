@@ -6,11 +6,11 @@
 #include <algorithm>
 #include <set>
 
-// constructor for leaf nodes
-Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requires_grad)
+// constructor for leaf nodes / primary constructor
+Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requires_grad, Device device)
     : data(std::make_shared<std::vector<double>>(std::move(values))),
       grad(nullptr),
-      shape(std::move(shape)), requires_grad(requires_grad), op(""), backward_func([](){}) {
+      shape(std::move(shape)), requires_grad(requires_grad), op(""), backward_func([](){}), device(device) {
     
     // compute row-major strides
     strides.resize(this->shape.size(), 1);
@@ -22,10 +22,10 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requi
 }
 
 // graph constructor for operations
-Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation)
+Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation, Device device)
     : data(std::make_shared<std::vector<double>>(std::move(values))), 
       grad(nullptr),
-      shape(std::move(shape)), requires_grad(false), prev(std::move(children)), op(std::move(operation)), backward_func([](){}){
+      shape(std::move(shape)), requires_grad(false), prev(std::move(children)), op(std::move(operation)), backward_func([](){}), device(device){
 
     // compute strides for the new shape layout
     strides.resize(this->shape.size(), 1);
@@ -44,8 +44,8 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vecto
 }
 
 // zero-copy view constructor
-Tensor::Tensor(std::shared_ptr<std::vector<double>> shared_data, std::shared_ptr<std::vector<double>> shared_grad, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation)
-    : data(std::move(shared_data)), grad(std::move(shared_grad)), shape(std::move(shape)), requires_grad(false), prev(std::move(children)), op(std::move(operation)), backward_func([](){}) {
+Tensor::Tensor(std::shared_ptr<std::vector<double>> shared_data, std::shared_ptr<std::vector<double>> shared_grad, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation, Device device)
+    : data(std::move(shared_data)), grad(std::move(shared_grad)), shape(std::move(shape)), requires_grad(false), prev(std::move(children)), op(std::move(operation)), backward_func([](){}), device(device) {
     
     strides.resize(this->shape.size(), 1);
     if (!this->shape.empty()) {
