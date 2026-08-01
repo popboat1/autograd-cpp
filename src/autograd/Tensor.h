@@ -6,7 +6,7 @@
 #include <functional>
 #include <string>
 
-#include "utils/cuda_utils.cuh"
+#include "utils/cuda_utils.h"
 
 class Tensor;
 using TensorPtr = std::shared_ptr<Tensor>;
