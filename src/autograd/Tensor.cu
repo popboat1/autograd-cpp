@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <set>
+#include <cublas_v2.h>
 
 // constructor for leaf nodes / primary constructor
 Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requires_grad, Device device)
@@ -236,6 +237,13 @@ Tensor::ReductionMeta Tensor::prepare_reduction_metadata(size_t dim, bool keepdi
     meta.outer_block_size = meta.total_out_elements / meta.inner_block_size;
 
     return meta;
+}
+
+// helper to create and reuse global cuBLAS handle
+cublasHandle_t get_cublas_handle() {
+    static cublasHandle_t handle = nullptr;
+    if(handle == nullptr) cublasCreate(&handle);
+    return handle;
 }
 
 void Tensor::ensure_grad_allocated(){
@@ -787,7 +795,10 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     size_t total_batches = 1;
     for (size_t dim : batch_shape) total_batches *= dim;
 
-    std::vector<double> out_values(total_batches * M * N, 0.0);
+    // create output tensor and push to target device
+    std::vector<double> dummy_vals(total_batches * M * N, 0.0);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), std::move(out_shape), std::vector<TensorPtr>{lhs, rhs}, "matmul");
+    out->to(lhs->device);
 
     // extract invariant trailing strides for 2D sub-matrix steps
     size_t lhs_stride_M = lhs->strides[lhs_rank - 2];
@@ -795,86 +806,152 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     size_t rhs_stride_K = rhs->strides[rhs_rank - 2];
     size_t rhs_stride_N = rhs->strides[rhs_rank - 1];
 
-    const double* lhs_ptr = lhs->data->data();
-    const double* rhs_ptr = rhs->data->data();
-    double* out_ptr = out_values.data();
+    if(lhs->device == Device::CUDA){
+        // cuBLAS gpu forward pass
+        static cublasHandle_t handle = get_cublas_handle();
+        const double alpha = 1.0;
+        const double beta = 0.0;
 
-    // forward pass now uses explicit index reconstruction to isolate thread state
-    #pragma omp parallel for schedule(static)
-    for (size_t b = 0; b < total_batches; ++b) {
-        size_t batch_lhs_off = 0;
-        size_t batch_rhs_off = 0;
-        size_t temp = b;
+        for(size_t b = 0; b < total_batches; ++b){
+            size_t batch_lhs_off = 0, batch_rhs_off = 0;
+            size_t temp = b;
+            for(int d = static_cast<int>(out_batch_dims) - 1; d >= 0; --d){
+                size_t coord = temp % batch_shape[d];
+                batch_lhs_off += coord * lhs_batch_strides[d];
+                batch_rhs_off += coord * rhs_batch_strides[d];
+                temp /= batch_shape[d];
+            }
+            size_t batch_out_off = b * M * N;
 
-        // reconstruct strides directly using stack primitives
-        for (int d = static_cast<int>(out_batch_dims) - 1; d >= 0; --d) {
-            size_t coord = temp % batch_shape[d];
-            batch_lhs_off += coord * lhs_batch_strides[d];
-            batch_rhs_off += coord * rhs_batch_strides[d];
-            temp /= batch_shape[d];
+            // swapped operands (rhs, lhs) for row-major/col-major tricks
+            cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                        N, M, K,
+                        &alpha,
+                        rhs->cuda_data + batch_rhs_off, N,
+                        lhs->cuda_data + batch_lhs_off, K,
+                        &beta,
+                        out->cuda_data + batch_out_off, N);
         }
-
-        size_t batch_out_off = b * M * N;
-
-        // standard 2D matrix multiplication multiplication on the current batch slice
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j < N; ++j) {
-                double sum_val = 0.0;
-                for (size_t k = 0; k < K; ++k) {
-                    sum_val += lhs_ptr[batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K] * 
-                               rhs_ptr[batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N];
+    } else { //CPU forward pass
+        const double* lhs_ptr = lhs->data->data();
+        const double* rhs_ptr = rhs->data->data();
+        double* out_ptr = out->data->data(); 
+    
+        // forward pass now uses explicit index reconstruction to isolate thread state
+        #pragma omp parallel for schedule(static)
+        for (size_t b = 0; b < total_batches; ++b) {
+            size_t batch_lhs_off = 0;
+            size_t batch_rhs_off = 0;
+            size_t temp = b;
+    
+            // reconstruct strides directly using stack primitives
+            for (int d = static_cast<int>(out_batch_dims) - 1; d >= 0; --d) {
+                size_t coord = temp % batch_shape[d];
+                batch_lhs_off += coord * lhs_batch_strides[d];
+                batch_rhs_off += coord * rhs_batch_strides[d];
+                temp /= batch_shape[d];
+            }
+    
+            size_t batch_out_off = b * M * N;
+    
+            // standard 2D matrix multiplication multiplication on the current batch slice
+            for (size_t i = 0; i < M; ++i) {
+                for (size_t j = 0; j < N; ++j) {
+                    double sum_val = 0.0;
+                    for (size_t k = 0; k < K; ++k) {
+                        sum_val += lhs_ptr[batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K] * 
+                                   rhs_ptr[batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N];
+                    }
+                    out_ptr[batch_out_off + i * N + j] = sum_val;
                 }
-                out_ptr[batch_out_off + i * N + j] = sum_val;
             }
         }
     }
 
-    auto out = std::make_shared<Tensor>(std::move(out_values), std::move(out_shape), std::vector<TensorPtr>{lhs, rhs}, "matmul");
-
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, batch_shape, lhs_batch_strides, rhs_batch_strides, total_batches, M, K, N, lhs_stride_M, lhs_stride_K, rhs_stride_K, rhs_stride_N]() {
+    out->backward_func = [lhs, rhs, weak_out, batch_shape, 
+                          lhs_batch_strides, rhs_batch_strides, 
+                          total_batches, M, K, N, 
+                          lhs_stride_M, lhs_stride_K, rhs_stride_K, rhs_stride_N]() {
+
         if (auto out_ptr = weak_out.lock()) {
             std::vector<size_t> back_batch_idx(batch_shape.size(), 0);
 
-            for (size_t b = 0; b < total_batches; ++b) {
-                size_t batch_lhs_off = Tensor::get_flat_index_from_broadcast(back_batch_idx, lhs_batch_strides);
-                size_t batch_rhs_off = Tensor::get_flat_index_from_broadcast(back_batch_idx, rhs_batch_strides);
-                size_t batch_out_off = b * M * N;
+            if(lhs->device == Device::CUDA) {
+                // -------- GPU backward pass using cuBLAS
+                cublasHandle_t handle = get_cublas_handle();
+                const double alpha = 1.0;
+                const double beta = 1.0; // grad must accumulate
 
-                // dL/dLHS = dL/dOut * RHS^T
-                if(lhs->requires_grad){
-                    for (size_t i = 0; i < M; ++i) {
-                        for (size_t k = 0; k < K; ++k) {
-                            double grad_sum = 0.0;
-                            for (size_t j = 0; j < N; ++j) {
-                                size_t out_flat = batch_out_off + i * N + j;
-                                size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
-                                grad_sum += (*out_ptr->grad)[out_flat] * (*rhs->data)[rhs_flat];
-                            }
-                            size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
-                            (*lhs->grad)[lhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
-                        }
+                for(size_t b = 0; b < total_batches; ++b){
+                    size_t batch_lhs_off = Tensor::get_flat_index_from_broadcast(back_batch_idx, lhs_batch_strides);
+                    size_t batch_rhs_off = Tensor::get_flat_index_from_broadcast(back_batch_idx, rhs_batch_strides);
+                    size_t batch_out_off = b * M * N;
+
+                    // dL/dLHS = dL/dOut * RHS^T
+                    if (lhs->requires_grad) {
+                        cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                                    K, M, N,
+                                    &alpha,
+                                    rhs->cuda_data + batch_rhs_off, N,
+                                    out_ptr->cuda_grad + batch_out_off, N,
+                                    &beta,
+                                    lhs->cuda_grad + batch_lhs_off, K);
                     }
-                }
 
-                // dL/dRHS = LHS^T * dL/dOut
-                if(rhs->requires_grad){
-                    for (size_t k = 0; k < K; ++k) {
-                        for (size_t j = 0; j < N; ++j) {
-                            double grad_sum = 0.0;
-                            for (size_t i = 0; i < M; ++i) {
-                                size_t out_flat = batch_out_off + i * N + j;
+                    // dL/dRHS = LHS^T * dL/dOut
+                    if (rhs->requires_grad) {
+                        cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                                    N, K, M,
+                                    &alpha,
+                                    out_ptr->cuda_grad + batch_out_off, N,
+                                    lhs->cuda_data + batch_lhs_off, K,
+                                    &beta,
+                                    rhs->cuda_grad + batch_rhs_off, N);
+                    }
+                    Tensor::advance_coordinates(back_batch_idx, batch_shape);
+                }
+            } else { // ----- backward pass on CPU
+                for (size_t b = 0; b < total_batches; ++b) {
+                    size_t batch_lhs_off = Tensor::get_flat_index_from_broadcast(back_batch_idx, lhs_batch_strides);
+                    size_t batch_rhs_off = Tensor::get_flat_index_from_broadcast(back_batch_idx, rhs_batch_strides);
+                    size_t batch_out_off = b * M * N;
+    
+                    // dL/dLHS = dL/dOut * RHS^T
+                    if(lhs->requires_grad){
+                        for (size_t i = 0; i < M; ++i) {
+                            for (size_t k = 0; k < K; ++k) {
+                                double grad_sum = 0.0;
+                                for (size_t j = 0; j < N; ++j) {
+                                    size_t out_flat = batch_out_off + i * N + j;
+                                    size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
+                                    grad_sum += (*out_ptr->grad)[out_flat] * (*rhs->data)[rhs_flat];
+                                }
                                 size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
-                                grad_sum += (*lhs->data)[lhs_flat] * (*out_ptr->grad)[out_flat];
+                                (*lhs->grad)[lhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
                             }
-                            size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
-                            (*rhs->grad)[rhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
                         }
                     }
+    
+                    // dL/dRHS = LHS^T * dL/dOut
+                    if(rhs->requires_grad){
+                        for (size_t k = 0; k < K; ++k) {
+                            for (size_t j = 0; j < N; ++j) {
+                                double grad_sum = 0.0;
+                                for (size_t i = 0; i < M; ++i) {
+                                    size_t out_flat = batch_out_off + i * N + j;
+                                    size_t lhs_flat = batch_lhs_off + i * lhs_stride_M + k * lhs_stride_K;
+                                    grad_sum += (*lhs->data)[lhs_flat] * (*out_ptr->grad)[out_flat];
+                                }
+                                size_t rhs_flat = batch_rhs_off + k * rhs_stride_K + j * rhs_stride_N;
+                                (*rhs->grad)[rhs_flat] += grad_sum; // automatically reduces across broadcasted batch dimensions
+                            }
+                        }
+                    }
+    
+                    Tensor::advance_coordinates(back_batch_idx, batch_shape);
                 }
-
-                Tensor::advance_coordinates(back_batch_idx, batch_shape);
             }
         }
     };
