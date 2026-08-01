@@ -58,6 +58,9 @@ public:
     std::vector<size_t> shape;
     std::vector<size_t> strides;
 
+    double* cuda_data = nullptr;
+    double* cuda_grad = nullptr;
+
     // device property
     Device device = Device::CPU;
 
@@ -88,6 +91,12 @@ public:
            std::vector<TensorPtr> children, 
            std::string operation = "",
            Device device = Device::CPU);
+    
+    // tensors moving function
+    void to(Device target_device);
+
+    // destructor
+    ~Tensor();
 
     // helper to map multidimensional index arrays to 1D flat storage offset
     size_t get_flat_index(const std::vector<size_t>& indices) const;

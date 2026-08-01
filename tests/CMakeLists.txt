@@ -5,6 +5,7 @@ add_executable(tensorgrad_tests
     ${CMAKE_SOURCE_DIR}/src/nn/Loss.cpp
 )
 add_test(NAME TensorGradMatrixTest COMMAND tensorgrad_tests)
+target_link_libraries(tensorgrad_tests PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
 
 # neural nets & optims tests
 add_executable(nn_tests
@@ -22,3 +23,4 @@ add_executable(nn_tests
     ${CMAKE_SOURCE_DIR}/src/nn/Sequential.cpp
 )
 add_test(NAME NNIntegrationTest COMMAND nn_tests)
+target_link_libraries(nn_tests PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)

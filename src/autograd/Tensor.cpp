@@ -1,4 +1,5 @@
 #include "Tensor.h"
+#include <cuda_runtime.h>
 #include <stdexcept>
 #include <iostream>
 #include <vector>
@@ -58,6 +59,45 @@ Tensor::Tensor(std::shared_ptr<std::vector<double>> shared_data, std::shared_ptr
         if (child->requires_grad) this->requires_grad = true;
     }
 }
+
+// device function to move tensors between cuda and cpu
+void Tensor::to(Device target_device){
+    if (this->device == target_device) return;
+
+    size_t bytes = data->size() * sizeof(double);
+
+    if(target_device == Device::CUDA){
+        // cpu -> gpu
+        cudaMalloc(&cuda_data, bytes);
+        cudaMemcpy(cuda_data, data->data(), bytes, cudaMemcpyHostToDevice);
+
+        if(grad){
+            cudaMalloc(&cuda_grad, bytes);
+            cudaMemcpy(cuda_grad, grad->data(), bytes, cudaMemcpyHostToDevice);
+        }
+    } else if(target_device == Device::CPU){
+        // gpu -> cpu
+        cudaMemcpy(data->data(), cuda_data, bytes, cudaMemcpyDeviceToHost);
+        cudaFree(cuda_data);
+        cuda_data = nullptr;
+
+        if(grad && cuda_grad){
+            cudaMemcpy(grad->data(), cuda_grad, bytes, cudaMemcpyDeviceToHost);
+            cudaFree(cuda_grad);
+            cuda_grad = nullptr;
+        }
+    }
+
+    this->device = target_device;
+}
+
+// destructor
+Tensor::~Tensor(){
+    if (cuda_data) cudaFree(cuda_data);
+    if (cuda_grad) cudaFree(cuda_grad);
+}
+
+
 
 // index mapping
 size_t Tensor::get_flat_index(const std::vector<size_t>& indices) const {
