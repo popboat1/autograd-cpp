@@ -6,7 +6,6 @@
 #include <cmath>
 #include <algorithm>
 #include <set>
-#include <cublas_v2.h>
 
 // constructor for leaf nodes / primary constructor
 Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requires_grad, Device device)
@@ -251,9 +250,30 @@ cublasHandle_t get_cublas_handle() {
 // -------------------------------------
 
 // functor for ReLU on the GPU
-struct reluforwardOp {
+struct reluForwardOp {
     __device__ double operator()(double x) const {
         return x > 0.0  ? x : 0.0;
+    }
+};
+
+// functor for exp on the GPU
+struct expForwardOp{
+    __device__ double operator()(double x) const {
+        return exp(x);
+    }
+};
+
+// functor for tanh on the gpu
+struct tanhForwardOp{
+    __device__ double operator()(double x) const {
+        return tanh(x);
+    }
+};
+
+// functor for sigmoid on the GPU
+struct sigmoidForwardOp {
+    __device__ double operator()(double x) const {
+        return 1.0 / (1.0 + exp(-x));
     }
 };
 
@@ -280,6 +300,29 @@ struct reluBackwardOp {
     }
 };
 
+// functor for exp's derivative
+struct expBackwardOp {
+    __device__ double operator()(double x) const {
+        return exp(x);
+    }
+};
+
+// functor for tanh's derivative
+struct tanhBackwardOp {
+    __device__ double operator()(double x) const {
+        double t = tanh(x);
+        return 1.0 - t * t;
+    }
+};
+
+// functor for sigmoid's derivative
+struct sigmoidBackwardOp {
+    __device__ double operator()(double x) const {
+        double s = 1.0 / (1.0 + exp(-x));
+        return s * (1.0 - s);
+    }
+};
+
 // unified __global__ backward kernel
 template <typename Op>
 __global__ void unary_backward(
@@ -295,6 +338,38 @@ __global__ void unary_backward(
         // chain rule: local derivative * upstream grad
         self_grad[idx] += upstream_grad[idx] * op(input_data[idx]);
     }
+}
+
+// --------------
+// some CUDA configs
+
+constexpr int threads = 256;
+
+// forward pass kernel launcher
+template <typename Op>
+inline void launch_unary_forward(
+    const double* input, 
+    double* output, 
+    size_t total_elements, 
+    Op op
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    unary_forward<<<blocks, threads>>>(input, output, total_elements, op);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// backward pass kernel launcher
+template <typename Op>
+inline void launch_unary_backward(
+    const double* upstream_grad, 
+    double* self_grad, 
+    const double* input_data, 
+    size_t total_elements, 
+    Op op
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    unary_backward<<<blocks, threads>>>(upstream_grad, self_grad, input_data, total_elements, op);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void Tensor::ensure_grad_allocated(){
@@ -847,7 +922,7 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
     for (size_t dim : batch_shape) total_batches *= dim;
 
     // create output tensor and push to target device
-    std::vector<double> dummy_vals(total_batches * M * N, 0.0);
+    std::vector<double> dummy_vals(total_batches * M * N);
     auto out = std::make_shared<Tensor>(std::move(dummy_vals), std::move(out_shape), std::vector<TensorPtr>{lhs, rhs}, "matmul");
     out->to(lhs->device);
 
@@ -1152,25 +1227,20 @@ TensorPtr Tensor::relu(){
     size_t total_elements = 1;
     for (size_t s : active_this->shape) total_elements *= s;
 
-    std::vector<double> dummy_vals(total_elements, 0.0);
+    std::vector<double> dummy_vals(total_elements);
     auto out = std::make_shared<Tensor>(std::move(dummy_vals), active_this->shape, std::vector<TensorPtr>{active_this}, "relu");
     out->to(active_this->device);
 
     // ---- forward pass
     if(active_this->device == Device::CUDA){
         // --- gpu forward pass
-        int threads = 256;
-        int blocks = cuda_utils::ceil_div(total_elements, threads);
-
-        unary_forward<<<blocks, threads>>>(
-            active_this->cuda_data,
-            out->cuda_data,
-            total_elements,
-            reluforwardOp()
+        launch_unary_forward(
+            active_this->cuda_data, 
+            out->cuda_data, 
+            total_elements, 
+            reluForwardOp()
         );
 
-        // check kernel launch errors
-        CUDA_CHECK(cudaGetLastError());
     } else {
         // --- cpu forward pass
         double* out_ptr = out->data->data();
@@ -1193,17 +1263,13 @@ TensorPtr Tensor::relu(){
 
                 // GPU backward pass
                 if(self->device == Device::CUDA){
-                    int threads = 256;
-                    int blocks = cuda_utils::ceil_div(total_elements, threads);
-
-                    unary_backward<<<blocks, threads>>>(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
-                        self->cuda_data,
-                        total_elements,
+                    launch_unary_backward(
+                        out_ptr->cuda_grad, 
+                        self->cuda_grad, 
+                        self->cuda_data, 
+                        total_elements, 
                         reluBackwardOp()
                     );
-                    CUDA_CHECK(cudaGetLastError());
 
                 } else {
                     // CPU backward pass
@@ -1222,39 +1288,66 @@ TensorPtr Tensor::relu(){
 
 // exp function
 TensorPtr Tensor::exp(){
-    size_t total_elements = 1;
-    for (size_t s : shape) total_elements *= s;
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
 
-    std::vector<double> out_vals(total_elements);
-    // forward pass
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_idx = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % shape[d];
-            flat_idx += coord * strides[d];
-            temp /= shape[d];
+    size_t total_elements = 1;
+    for (size_t s : active_this->shape) total_elements *= s;
+
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), active_this->shape, std::vector<TensorPtr>{active_this}, "exp");
+    out->to(active_this->device);
+
+    // --- forward pass
+    if(active_this->device == Device::CUDA){
+        // --- gpu forward pass
+        launch_unary_forward(
+            active_this->cuda_data, 
+            out->cuda_data, 
+            total_elements, 
+            expForwardOp()
+        );
+
+    } else {
+        // -- cpu forward pass
+        double* out_ptr = out->data->data();
+        double* in_ptr = active_this->data->data();
+        
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            out_ptr[i] = std::exp(in_ptr[i]);
         }
-        out_vals[i] = std::exp((*data)[flat_idx]);
     }
 
-    auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "exp");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
+    auto self = active_this;
+
     out->backward_func = [self, weak_out, total_elements]() {
         if(auto out_ptr = weak_out.lock()){
-            std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < total_elements; ++i){
-                size_t flat_idx = self->get_flat_index(back_coords);
-                if(self->requires_grad){
-                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (*out_ptr->data)[i];
+            if (self->requires_grad) {
+
+                // -- gpu
+                if(self->device == Device::CUDA){
+                    launch_unary_backward(
+                        out_ptr->cuda_grad, 
+                        self->cuda_grad, 
+                        self->cuda_data, 
+                        total_elements, 
+                        expBackwardOp()
+                    );
+
+                } else {
+                    // --- cpu
+                    for(size_t i = 0; i < total_elements; ++i){
+                        double local_derivative = std::exp((*self->data)[i]);
+                        (*self->grad)[i] += (*out_ptr->grad)[i] * local_derivative;
+                    }
                 }
-                advance_coordinates(back_coords, self->shape);
+
             }
+
         }
     };
 
@@ -1263,39 +1356,65 @@ TensorPtr Tensor::exp(){
 
 //tanh function
 TensorPtr Tensor::tanh(){
-    size_t total_elements = 1;
-    for (size_t s : shape) total_elements *= s;
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
 
-    std::vector<double> out_vals (total_elements);
-    // forward pass
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_idx = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % shape[d];
-            flat_idx += coord * strides[d];
-            temp /= shape[d];
+    size_t total_elements = 1;
+    for (size_t s : active_this->shape) total_elements *= s;
+
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), active_this->shape, std::vector<TensorPtr>{active_this}, "tanh");
+    out->to(active_this->device);
+
+    // --- forward pass
+    if(active_this->device == Device::CUDA){
+        // --- gpu
+        launch_unary_forward(
+            active_this->cuda_data, 
+            out->cuda_data, 
+            total_elements, 
+            tanhForwardOp()
+        );
+
+    } else {
+        // --cpu
+        double* out_ptr = out->data->data();
+        double* in_ptr = active_this->data->data();
+
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            out_ptr[i] = std::tanh(in_ptr[i]);
         }
-        out_vals[i] = std::tanh((*data)[flat_idx]);
     }
 
-    auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "tanh");
 
-    // backward pass
+    // --- backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
+    auto self = active_this;
+
     out->backward_func = [self, weak_out, total_elements](){
         if(auto out_ptr = weak_out.lock()){
-            std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < total_elements; ++i){
-                size_t flat_idx = self->get_flat_index(back_coords);
-                double t = (*out_ptr->data)[i];
-                if(self->requires_grad){
-                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (1.0 - t * t);
+            if(self->requires_grad){
+
+                // gpu backward
+                if(self->device == Device::CUDA){
+                    launch_unary_backward(
+                        out_ptr->cuda_grad, 
+                        self->cuda_grad, 
+                        self->cuda_data, 
+                        total_elements, 
+                        tanhBackwardOp()
+                    );
+
+                } else {
+                    // --- cpu
+                    for(size_t i = 0; i < total_elements; ++i){
+                        double t = std::tanh((*self->data)[i]);
+                        double local_derivative = 1.0 - t * t;
+                        (*self->grad)[i] += (*out_ptr->grad)[i] * local_derivative;
+                    }
                 }
-                advance_coordinates(back_coords, self->shape);
+
             }
         }
     };
@@ -1306,39 +1425,64 @@ TensorPtr Tensor::tanh(){
 
 // sigmoid function
 TensorPtr Tensor::sigmoid(){
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
+
     size_t total_elements = 1;
     for (size_t s : shape) total_elements *= s;
 
-    std::vector<double> out_vals(total_elements);
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), active_this->shape, std::vector<TensorPtr>{active_this}, "sigmoid");
+    out->to(active_this->device);
+    
     // forward pass
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_idx = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % shape[d];
-            flat_idx += coord * strides[d];
-            temp /= shape[d];
+    if(active_this->device == Device::CUDA){
+        // --- gpu forward pass
+        launch_unary_forward(
+            active_this->cuda_data, 
+            out->cuda_data, 
+            total_elements, 
+            sigmoidForwardOp()
+        );
+
+    } else {
+        // --- cpu
+        double* out_ptr = out->data->data();
+        double* in_ptr = active_this->data->data();
+
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            out_ptr[i] = 1.0 / (1.0 + std::exp(-in_ptr[i]));
         }
-        out_vals[i] = 1.0 / (1.0 + std::exp(-(*data)[flat_idx]));
     }
 
-    auto out = std::make_shared<Tensor>(out_vals, shape, std::vector<TensorPtr>{shared_from_this()}, "sigmoid");
 
     //backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
+    auto self = active_this;
+
     out->backward_func = [self, weak_out, total_elements]() {
         if(auto out_ptr = weak_out.lock()){
-            std::vector<size_t> back_coords(self->shape.size(), 0);
-            for(size_t i = 0; i < total_elements; ++i){
-                size_t flat_idx = self->get_flat_index(back_coords);
-                double s = (*out_ptr->data)[i];
-                if(self->requires_grad){
-                    (*self->grad)[flat_idx] += (*out_ptr->grad)[i] * (s * (1.0 - s));
+            if(self->requires_grad){
+
+                // GPU backward pass
+                if(self->device == Device::CUDA){
+                    launch_unary_backward(
+                        out_ptr->cuda_grad, 
+                        self->cuda_grad, 
+                        self->cuda_data, 
+                        total_elements, 
+                        sigmoidBackwardOp()
+                    );
+
+                } else {
+                    // CPU backward pass
+                    for(size_t i = 0; i < total_elements; ++i){
+                        double s = (*self->data)[i];
+                        (*self->grad)[i] += (*out_ptr->grad)[i] * (s * (1.0 - s));
+                    }
                 }
-                advance_coordinates(back_coords, self->shape);
+
             }
         }
     };
