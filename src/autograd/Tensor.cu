@@ -241,8 +241,8 @@ Tensor::ReductionMeta Tensor::prepare_reduction_metadata(size_t dim, bool keepdi
 
 // helper to create and reuse global cuBLAS handle
 cublasHandle_t get_cublas_handle() {
-    static cublasHandle_t handle = nullptr;
-    if(handle == nullptr) cublasCreate(&handle);
+    thread_local static cublasHandle_t handle = nullptr;
+    if (handle == nullptr) CUBLAS_CHECK(cublasCreate(&handle));
     return handle;
 }
 
@@ -859,7 +859,7 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
 
     if(lhs->device == Device::CUDA){
         // cuBLAS gpu forward pass
-        static cublasHandle_t handle = get_cublas_handle();
+        cublasHandle_t handle = get_cublas_handle();
         const double alpha = 1.0;
         const double beta = 0.0;
 
@@ -875,13 +875,13 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
             size_t batch_out_off = b * M * N;
 
             // swapped operands (rhs, lhs) for row-major/col-major tricks
-            cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+            CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                         N, M, K,
                         &alpha,
                         rhs->cuda_data + batch_rhs_off, N,
                         lhs->cuda_data + batch_lhs_off, K,
                         &beta,
-                        out->cuda_data + batch_out_off, N);
+                        out->cuda_data + batch_out_off, N));
         }
     } else { //CPU forward pass
         const double* lhs_ptr = lhs->data->data();
@@ -942,24 +942,24 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
 
                     // dL/dLHS = dL/dOut * RHS^T
                     if (lhs->requires_grad) {
-                        cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                        CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
                                     K, M, N,
                                     &alpha,
                                     rhs->cuda_data + batch_rhs_off, N,
                                     out_ptr->cuda_grad + batch_out_off, N,
                                     &beta,
-                                    lhs->cuda_grad + batch_lhs_off, K);
+                                    lhs->cuda_grad + batch_lhs_off, K));
                     }
 
                     // dL/dRHS = LHS^T * dL/dOut
                     if (rhs->requires_grad) {
-                        cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                        CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
                                     N, K, M,
                                     &alpha,
                                     out_ptr->cuda_grad + batch_out_off, N,
                                     lhs->cuda_data + batch_lhs_off, K,
                                     &beta,
-                                    rhs->cuda_grad + batch_rhs_off, N);
+                                    rhs->cuda_grad + batch_rhs_off, N));
                     }
                     Tensor::advance_coordinates(back_batch_idx, batch_shape);
                 }
