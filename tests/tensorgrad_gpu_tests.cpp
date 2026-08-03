@@ -177,6 +177,121 @@ int main() {
         assert(close_enough((*x->grad)[1], -1.0));
         std::cout << "[PASS] neg cuda pass verified\n";
     }
+    std::cout << "[PASS] all unary kernels verified\n";
+
+    // test 9: addition matching shape fast path on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, true);
+        auto b = std::make_shared<Tensor>(std::vector<double>{4.0, 5.0, 6.0}, std::vector<size_t>{3}, true);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = a + b;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 5.0));
+        assert(close_enough((*out->data)[1], 7.0));
+        assert(close_enough((*out->data)[2], 9.0));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+        b->to(Device::CPU);
+
+        assert(close_enough((*a->grad)[0], 1.0));
+        assert(close_enough((*a->grad)[2], 1.0));
+        assert(close_enough((*b->grad)[0], 1.0));
+        assert(close_enough((*b->grad)[2], 1.0));
+        std::cout << "[PASS] operator+ cuda fast path verified\n";
+    }
+
+    // test 10: addition broadcasting path on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, std::vector<size_t>{2, 3}, true);
+        auto b = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0}, std::vector<size_t>{3}, true);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = a + b;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 11.0));
+        assert(close_enough((*out->data)[2], 33.0));
+        assert(close_enough((*out->data)[3], 14.0));
+        assert(close_enough((*out->data)[5], 36.0));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+        b->to(Device::CPU);
+
+        // a receives 1.0 for each element
+        assert(close_enough((*a->grad)[0], 1.0));
+        assert(close_enough((*a->grad)[5], 1.0));
+
+        // b is broadcasted across 2 rows, so gradients accumulate to 2.0
+        assert(close_enough((*b->grad)[0], 2.0));
+        assert(close_enough((*b->grad)[1], 2.0));
+        assert(close_enough((*b->grad)[2], 2.0));
+        std::cout << "[PASS] operator+ cuda broadcast path verified\n";
+    }
+
+    // test 11: subtraction matching shape fast path on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{5.0, 8.0, 12.0}, std::vector<size_t>{3}, true);
+        auto b = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0, 4.0}, std::vector<size_t>{3}, true);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = a - b;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 3.0));
+        assert(close_enough((*out->data)[1], 5.0));
+        assert(close_enough((*out->data)[2], 8.0));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+        b->to(Device::CPU);
+
+        assert(close_enough((*a->grad)[0], 1.0));
+        assert(close_enough((*a->grad)[2], 1.0));
+        assert(close_enough((*b->grad)[0], -1.0));
+        assert(close_enough((*b->grad)[2], -1.0));
+        std::cout << "[PASS] operator- cuda fast path verified\n";
+    }
+
+    // test 12: subtraction broadcasting path on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, std::vector<size_t>{2, 3}, true);
+        auto b = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, true);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = a - b;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 9.0));
+        assert(close_enough((*out->data)[2], 27.0));
+        assert(close_enough((*out->data)[3], 39.0));
+        assert(close_enough((*out->data)[5], 57.0));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+        b->to(Device::CPU);
+
+        // a receives +1.0 for each element
+        assert(close_enough((*a->grad)[0], 1.0));
+        assert(close_enough((*a->grad)[5], 1.0));
+
+        // b is broadcasted across 2 rows, accumulating -1.0 twice = -2.0
+        assert(close_enough((*b->grad)[0], -2.0));
+        assert(close_enough((*b->grad)[1], -2.0));
+        assert(close_enough((*b->grad)[2], -2.0));
+        std::cout << "[PASS] operator- cuda broadcast path verified\n";
+    }
 
     std::cout << "[PASS] all gpu tests passed cleanly\n";
     return 0;

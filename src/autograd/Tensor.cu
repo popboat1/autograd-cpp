@@ -265,80 +265,14 @@ cublasHandle_t get_cublas_handle() {
 // -------- forward pass kernels for GPU
 // -------------------------------------
 
+// --- relu
+
 // functor for ReLU on the GPU
 struct reluForwardOp {
     __device__ double operator()(double x) const {
         return x > 0.0  ? x : 0.0;
     }
 };
-
-// functor for exp on the GPU
-struct expForwardOp{
-    __device__ double operator()(double x) const {
-        return exp(x);
-    }
-};
-
-// functor for tanh on the gpu
-struct tanhForwardOp{
-    __device__ double operator()(double x) const {
-        return tanh(x);
-    }
-};
-
-// functor for sigmoid on the GPU
-struct sigmoidForwardOp {
-    __device__ double operator()(double x) const {
-        return 1.0 / (1.0 + exp(-x));
-    }
-};
-
-// functor for log on GPU
-struct logForwardOp {
-    __device__ double operator()(double x) const {
-        return log(x);
-    }
-};
-
-// functor for pow on GPU
-struct powForwardOp{
-    double exponent;
-    powForwardOp(double exp) : exponent(exp){}
-
-    __device__ double operator()(double x) const {
-        return pow(x, exponent);
-    }
-};
-
-// functor for sqrt
-struct sqrtForwardOp{
-    __device__ double operator()(double x) const {
-        return sqrt(x);
-    }
-};
-
-// functor for neg
-struct negForwardOp {
-    __device__ double operator()(double x) const {
-        return -x;
-    }
-};
-
-// unified __global__ kernel
-template <typename Op>
-__global__ void unary_forward(const double* input, double* output, size_t total_elements, Op op) {
-    // calculate idx
-    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
-
-    // ensure we dont read/write past the end of array
-    if(idx < total_elements){
-        output[idx] = op(input[idx]);
-    }
-}
-
-// --------------------------------------
-// ------- backward pass kernels for GPU
-// --------------------------------------
 
 // functor for ReLU's derivative
 struct reluBackwardOp {
@@ -347,10 +281,30 @@ struct reluBackwardOp {
     }
 };
 
+
+// --- exp
+
+// functor for exp on the GPU
+struct expForwardOp{
+    __device__ double operator()(double x) const {
+        return exp(x);
+    }
+};
+
 // functor for exp's derivative
 struct expBackwardOp {
     __device__ double operator()(double x) const {
         return exp(x);
+    }
+};
+
+
+// --- tanh
+
+// functor for tanh on the gpu
+struct tanhForwardOp{
+    __device__ double operator()(double x) const {
+        return tanh(x);
     }
 };
 
@@ -362,6 +316,16 @@ struct tanhBackwardOp {
     }
 };
 
+
+// --- sigmoid
+
+// functor for sigmoid on the GPU
+struct sigmoidForwardOp {
+    __device__ double operator()(double x) const {
+        return 1.0 / (1.0 + exp(-x));
+    }
+};
+
 // functor for sigmoid's derivative
 struct sigmoidBackwardOp {
     __device__ double operator()(double x) const {
@@ -370,10 +334,33 @@ struct sigmoidBackwardOp {
     }
 };
 
+
+// --- log
+
+// functor for log on GPU
+struct logForwardOp {
+    __device__ double operator()(double x) const {
+        return log(x);
+    }
+};
+
 // functor for log's derivative
 struct logBackwardOp {
     __device__ double operator()(double x) const {
         return 1.0 / x;
+    }
+};
+
+
+// --- pow
+
+// functor for pow on GPU
+struct powForwardOp{
+    double exponent;
+    powForwardOp(double exp) : exponent(exp){}
+
+    __device__ double operator()(double x) const {
+        return pow(x, exponent);
     }
 };
 
@@ -387,10 +374,30 @@ struct powBackwardOp {
     }
 };
 
+
+// --- sqrt
+
+// functor for sqrt
+struct sqrtForwardOp{
+    __device__ double operator()(double x) const {
+        return sqrt(x);
+    }
+};
+
 // functor for sqrt's derivative
 struct sqrtBackwardOp {
     __device__ double operator()(double x) const {
         return (x == 0.0) ? 0.0 : (0.5 / sqrt(x));
+    }
+};
+
+
+// --- neg
+
+// functor for neg
+struct negForwardOp {
+    __device__ double operator()(double x) const {
+        return -x;
     }
 };
 
@@ -400,6 +407,21 @@ struct negBackwardOp {
         return -1.0;
     }
 };
+
+
+// --- templates
+
+// unified __global__ kernel
+template <typename Op>
+__global__ void unary_forward(const double* input, double* output, size_t total_elements, Op op) {
+    // calculate idx
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    // ensure we dont read/write past the end of array
+    if(idx < total_elements){
+        output[idx] = op(input[idx]);
+    }
+}
 
 // unified __global__ backward kernel
 template <typename Op>
@@ -418,12 +440,162 @@ __global__ void unary_backward(
     }
 }
 
+
 // end of unary kernels....
 // -------------------------------------------
 
+
 // BINARY OPERATORS KERNELS
 // ---------------------------------
+constexpr size_t MAX_DIMS = 8;
 
+struct BroadcastMeta {
+    size_t ndim;
+    size_t out_shape[MAX_DIMS];
+    size_t lhs_strides[MAX_DIMS];
+    size_t rhs_strides[MAX_DIMS];
+};
+
+// helper function to build BroadcastMeta on CPU
+inline BroadcastMeta create_broadcast_meta(
+    const std::vector<size_t>& out_shape,
+    const std::vector<size_t>& lhs_b_strides,
+    const std::vector<size_t>& rhs_b_strides
+) {
+    if (out_shape.size() > MAX_DIMS) {
+        throw std::invalid_argument("Broadcasting exceeds maximum supported rank of 8 dimensions.");
+    }
+    BroadcastMeta meta;
+    meta.ndim = out_shape.size();
+    for (size_t i = 0; i < meta.ndim; ++i) {
+        meta.out_shape[i] = out_shape[i];
+        meta.lhs_strides[i] = lhs_b_strides[i];
+        meta.rhs_strides[i] = rhs_b_strides[i];
+    }
+    return meta;
+}
+
+
+// ----- kernels
+
+// --- additions (+)
+struct addForwardOp {
+    __device__ double operator()(double x, double y) const {
+        return x + y;
+    }
+};
+
+// addition backward pass template
+__global__ void accumulate_grad(double* target_grad, const double* upstream_grad, size_t total_elements) {
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < total_elements) {
+        target_grad[idx] += upstream_grad[idx];
+    }
+}
+
+// additon backward pass with broadcasting
+__global__ void accumulate_grad_broadcast(
+    double* target_grad,
+    const double* upstream_grad,
+    size_t total_elements,
+    BroadcastMeta meta,
+    bool is_lhs
+) {
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < total_elements) {
+        size_t target_flat = 0;
+        size_t temp = idx;
+
+        for (int d = static_cast<int>(meta.ndim) - 1; d >= 0; --d) {
+            size_t coord = temp % meta.out_shape[d];
+            target_flat += coord * (is_lhs ? meta.lhs_strides[d] : meta.rhs_strides[d]);
+            temp /= meta.out_shape[d];
+        }
+
+        atomicAdd(&target_grad[target_flat], upstream_grad[idx]);
+    }
+}
+
+// --- substraction (-)
+struct subForwardOp {
+    __device__ double operator()(double x, double y) const {
+        return x - y;
+    }
+};
+
+// kernels for operator- backward pass
+__global__ void subtract_grad(double* target_grad, const double* upstream_grad, size_t total_elements){
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if(idx < total_elements){
+        target_grad[idx] -= upstream_grad[idx];
+    }
+}
+
+// subtraction backward pass with broadcasting
+__global__ void subtract_grad_broadcast(
+    double* target_grad, 
+    const double* upstream_grad, 
+    size_t total_elements,
+    BroadcastMeta meta,
+    bool is_lhs
+){
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if(idx < total_elements){
+        size_t target_flat = 0;
+        size_t temp = idx;
+
+        for(int d = static_cast<int>(meta.ndim) - 1; d >= 0; --d){
+            size_t coord = temp % meta.out_shape[d];
+            target_flat += coord * (is_lhs ? meta.lhs_strides[d] : meta.rhs_strides[d]);
+            temp /= meta.out_shape[d];
+        }
+
+        atomicAdd(&target_grad[target_flat], -upstream_grad[idx]);
+    }
+}
+
+
+// ---- templates
+// forward pass template
+template <typename Op>
+__global__ void binary_forward(const double* lhs, const double* rhs, double* output, size_t total_elements, Op op) {
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < total_elements) {
+        output[idx] = op(lhs[idx], rhs[idx]);
+    }
+}
+
+// forward pass with broadcasting
+template <typename Op>
+__global__ void binary_forward_broadcast(
+    const double* lhs,
+    const double* rhs,
+    double* output,
+    size_t total_elements,
+    BroadcastMeta meta,
+    Op op
+) {
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < total_elements) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = idx;
+
+
+        for (int d = static_cast<int>(meta.ndim) - 1; d >= 0; --d) {
+            size_t coord = temp % meta.out_shape[d];
+            flat_lhs += coord * meta.lhs_strides[d];
+            flat_rhs += coord * meta.rhs_strides[d];
+            temp /= meta.out_shape[d];
+        }
+
+        output[idx] = op(lhs[flat_lhs], rhs[flat_rhs]);
+    }
+}
+
+
+// end of binary op kernels....
+// ---------------------------------
 
 
 // --------------
@@ -431,7 +603,9 @@ __global__ void unary_backward(
 
 constexpr int threads = 256;
 
-// forward pass kernel launcher
+// -----------------------------------
+// unary kernel launchers
+// unary forward pass kernel launcher
 template <typename Op>
 inline void launch_unary_forward(
     const double* input, 
@@ -444,7 +618,7 @@ inline void launch_unary_forward(
     CUDA_CHECK(cudaGetLastError());
 }
 
-// backward pass kernel launcher
+// unary backward pass kernel launcher
 template <typename Op>
 inline void launch_unary_backward(
     const double* upstream_grad, 
@@ -457,6 +631,85 @@ inline void launch_unary_backward(
     unary_backward<<<blocks, threads>>>(upstream_grad, self_grad, input_data, total_elements, op);
     CUDA_CHECK(cudaGetLastError());
 }
+
+// ---------------------------------
+// binary kernel launchers
+// binary forward kernel launcher
+template <typename Op>
+inline void launch_binary_forward(
+    const double* lhs,
+    const double* rhs,
+    double* output,
+    size_t total_elements,
+    Op op
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    binary_forward<<<blocks, threads>>>(lhs, rhs, output, total_elements, op);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// binary forward with broadcasting launcher
+template <typename Op>
+inline void launch_binary_forward_broadcast(
+    const double* lhs,
+    const double* rhs,
+    double* output,
+    size_t total_elements,
+    BroadcastMeta meta,
+    Op op
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    binary_forward_broadcast<<<blocks, threads>>>(lhs, rhs, output, total_elements, meta, op);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// addition backward pass launchers
+inline void launch_accumulate_grad_broadcast(
+    double* target_grad,
+    const double* upstream_grad,
+    size_t total_elements,
+    BroadcastMeta meta,
+    bool is_lhs
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    accumulate_grad_broadcast<<<blocks, threads>>>(target_grad, upstream_grad, total_elements, meta, is_lhs);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+inline void launch_accumulate_grad(
+    double* target_grad,
+    const double* upstream_grad,
+    size_t total_elements
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    accumulate_grad<<<blocks, threads>>>(target_grad, upstream_grad, total_elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// substraction backward pass launchers
+inline void launch_subtract_grad(
+    double* target_grad,
+    const double* upstream_grad,
+    size_t total_elements
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    subtract_grad<<<blocks, threads>>>(target_grad, upstream_grad, total_elements);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+inline void launch_subtract_grad_broadcast(
+    double* target_grad,
+    const double* upstream_grad,
+    size_t total_elements,
+    BroadcastMeta meta,
+    bool is_lhs
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    subtract_grad_broadcast<<<blocks, threads>>>(target_grad, upstream_grad, total_elements, meta, is_lhs);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ----------------------------------------------------------
 
 void Tensor::ensure_grad_allocated(){
     if(grad == nullptr){
@@ -670,6 +923,8 @@ TensorPtr Tensor::sub_(const TensorPtr& other) {
 
 // addition op
 TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
+    if (lhs->device != rhs->device) throw std::invalid_argument("Tensors must be on the same device");
+
     std::vector<size_t> out_shape;
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
@@ -679,50 +934,121 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
 
     // calculate total elements needed for the output data array
     size_t total_elements = 1;
-    for(size_t dim : out_shape){
-        total_elements *= dim;
-    }
-    std::vector<double> out_values(total_elements, 0.0);
+    for(size_t dim : out_shape) total_elements *= dim;
+    
+    // determine device target
+    Device active_device = (lhs->device == Device::CUDA || rhs->device == Device::CUDA) ? Device::CUDA : Device::CPU;
+
+    std::vector<double> dummy_vals(total_elements);
+    // construct graph node
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), out_shape, std::vector<TensorPtr>{lhs, rhs}, "+");
+    out->to(active_device);
+
+    bool is_matching_shape = (lhs->shape == rhs->shape) && lhs->is_contiguous() && rhs->is_contiguous();
 
     // forward pass
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_lhs = 0;
-        size_t flat_rhs = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % out_shape[d];
-            flat_lhs += coord * lhs_b_strides[d];
-            flat_rhs += coord * rhs_b_strides[d];
-            temp /= out_shape[d];
+    if(active_device == Device::CUDA) {
+        // --- gpu forward
+        if(is_matching_shape){
+            launch_binary_forward(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                addForwardOp()
+            );
+
+        } else {
+            // --- gpu forward with broadcasting
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                meta,
+                addForwardOp()
+            );
+
         }
-        out_values[i] = (*lhs->data)[flat_lhs] + (*rhs->data)[flat_rhs];
+    } else {
+        // --- cpu forward
+        double* out_ptr = out->data->data();
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0;
+            size_t flat_rhs = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
+            out_ptr[i] = (*lhs->data)[flat_lhs] + (*rhs->data)[flat_rhs];
+        }
     }
 
-    // construct graph node
-    auto out = std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{lhs, rhs}, "+");
 
-    // backward pass
+    // --- backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements]() {
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements, active_device, is_matching_shape]() {
         if(auto out_ptr = weak_out.lock()) {
-            std::vector<size_t> back_idx(out_shape.size(), 0);
 
-            for(size_t i {0}; i < total_elements; ++i){
-                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
-                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
-                
-                // upstream gradient vector aligns perfectly with total_elements sequence
-                auto upstream_grad = (*out_ptr->grad)[i];
+            if(active_device == Device::CUDA){
+                // --- GPU backward pass
+                if(is_matching_shape){
+                    if (lhs->requires_grad) {
+                        launch_accumulate_grad(lhs->cuda_grad, out_ptr->cuda_grad, total_elements);
+                    }
+                    if (rhs->requires_grad) {
+                        launch_accumulate_grad(rhs->cuda_grad, out_ptr->cuda_grad, total_elements);
+                    }
 
-                // zero-stride values automatically combine multi-dimensional gradients here
-                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad;
-                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] += upstream_grad;
+                } else {
+                    // --- backward pass with broadcasting
+                    BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+                    if(lhs->requires_grad){
+                        launch_accumulate_grad_broadcast(
+                            lhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            total_elements, 
+                            meta, 
+                            true
+                        );
+                    }
 
-                // step backward coordinate tracking layout forward
-                Tensor::advance_coordinates(back_idx, out_shape);
+                    if(rhs->requires_grad){
+                        launch_accumulate_grad_broadcast(
+                            rhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            total_elements, 
+                            meta, 
+                            false
+                        );
+                    }
+                }
+
+            } else {
+                std::vector<size_t> back_idx(out_shape.size(), 0);
+    
+                for(size_t i {0}; i < total_elements; ++i){
+                    size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                    size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                    
+                    // upstream gradient vector aligns perfectly with total_elements sequence
+                    double upstream_grad = (*out_ptr->grad)[i];
+    
+                    // zero-stride values automatically combine multi-dimensional gradients here
+                    if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad;
+                    if(rhs->requires_grad) (*rhs->grad)[flat_rhs] += upstream_grad;
+    
+                    // step backward coordinate tracking layout forward
+                    Tensor::advance_coordinates(back_idx, out_shape);
+                }
             }
+            
         }
     };
 
@@ -731,6 +1057,8 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
 
 // substraction op
 TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
+    if (lhs->device != rhs->device) throw std::invalid_argument("Tensors must be on the same device");
+
     std::vector<size_t> out_shape;
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
@@ -740,50 +1068,121 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
 
     // calc total elements needed for out data
     size_t total_elements = 1;
-    for(size_t dim : out_shape){
-        total_elements *= dim;
-    }
-    std::vector<double> out_values(total_elements, 0.0);
+    for(size_t dim : out_shape) total_elements *= dim;
+
+    // determine device target
+    Device active_device = (lhs->device == Device::CUDA || rhs->device == Device::CUDA) ? Device::CUDA : Device::CPU;
+
+    std::vector<double> dummy_vals(total_elements);
+    // construct graph node
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), out_shape, std::vector<TensorPtr>{lhs,rhs}, "-");
+    out->to(active_device);
+
+    bool is_matching_shape = (lhs->shape == rhs->shape) && lhs->is_contiguous() && rhs->is_contiguous();
 
     // forward pass
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_lhs = 0;
-        size_t flat_rhs = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % out_shape[d];
-            flat_lhs += coord * lhs_b_strides[d];
-            flat_rhs += coord * rhs_b_strides[d];
-            temp /= out_shape[d];
+    if(active_device == Device::CUDA){
+        // --- gpu forward
+        if(is_matching_shape){
+            launch_binary_forward(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                subForwardOp()
+            );
+
+        } else {
+            // --- gpu forward with broadcasting
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                meta,
+                subForwardOp()
+            );
+
         }
-        out_values[i] = (*lhs->data)[flat_lhs] - (*rhs->data)[flat_rhs];
+    } else {
+        // --- cpu forward pass
+        double* out_ptr = out->data->data();
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0;
+            size_t flat_rhs = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
+            out_ptr[i] = (*lhs->data)[flat_lhs] - (*rhs->data)[flat_rhs];
+        }
     }
 
-    // construct graph node
-    auto out = std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{lhs,rhs}, "-");
 
-    // backward pass
+    // --- backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements]() {
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements, active_device, is_matching_shape]() {
         if(auto out_ptr = weak_out.lock()){
-            std::vector<size_t> back_idx(out_shape.size(), 0);
 
-            for(size_t i {0}; i < total_elements; ++i){
-                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
-                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
-                
-                // upstream gradient vector aligns perfectly with total_elements sequence
-                auto upstream_grad = (*out_ptr->grad)[i];
+            if(active_device == Device::CUDA){
+                // --- GPU backward pass
+                if(is_matching_shape) {
+                    if(lhs->requires_grad){
+                        launch_accumulate_grad(lhs->cuda_grad, out_ptr->cuda_grad, total_elements); 
+                    }
+                    if(rhs->requires_grad){
+                        launch_subtract_grad(rhs->cuda_grad, out_ptr->cuda_grad, total_elements);
+                    }
 
-                // zero-stride values automatically combine multi-dimensional gradients here
-                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad;
-                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] -= upstream_grad;
+                } else {
+                    // --- backward pass with broadcasting
+                    BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+                    if(lhs->requires_grad){
+                        launch_accumulate_grad_broadcast(
+                            lhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            total_elements, 
+                            meta, 
+                            true
+                        );
+                    }
 
-                // step backward coordinate tracking layout forward
-                Tensor::advance_coordinates(back_idx, out_shape);
+                    if(rhs->requires_grad){
+                        launch_subtract_grad_broadcast(
+                            rhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            total_elements, 
+                            meta, 
+                            false
+                        );
+                    }
+                }
+
+            }  else {
+                std::vector<size_t> back_idx(out_shape.size(), 0);
+    
+                for(size_t i {0}; i < total_elements; ++i){
+                    size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                    size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                    
+                    // upstream gradient vector aligns perfectly with total_elements sequence
+                    auto upstream_grad = (*out_ptr->grad)[i];
+    
+                    // zero-stride values automatically combine multi-dimensional gradients here
+                    if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad;
+                    if(rhs->requires_grad) (*rhs->grad)[flat_rhs] -= upstream_grad;
+    
+                    // step backward coordinate tracking layout forward
+                    Tensor::advance_coordinates(back_idx, out_shape);
+                }
             }
+            
         }
     };
 
