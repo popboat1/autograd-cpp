@@ -7,6 +7,14 @@ add_executable(tensorgrad_tests
 add_test(NAME TensorGradMatrixTest COMMAND tensorgrad_tests)
 target_link_libraries(tensorgrad_tests PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
 
+# GPU tensor engine unit tests
+add_executable(tensorgrad_gpu_tests
+    tensorgrad_gpu_tests.cpp
+    ${CMAKE_SOURCE_DIR}/src/autograd/Tensor.cu
+)
+add_test(NAME TensorGradGPUTest COMMAND tensorgrad_gpu_tests)
+target_link_libraries(tensorgrad_gpu_tests PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
+
 # neural nets & optims tests
 add_executable(nn_tests
     nn_tests.cpp
