@@ -485,36 +485,19 @@ struct addForwardOp {
     }
 };
 
-// addition backward pass template
-__global__ void accumulate_grad(double* target_grad, const double* upstream_grad, size_t total_elements) {
-    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx < total_elements) {
-        target_grad[idx] += upstream_grad[idx];
+// functors for derivative of operator+
+struct addLhsGradOp {
+    __device__ double operator()(double x, double y) const {
+        return 1.0;
     }
-}
+};
 
-// additon backward pass with broadcasting
-__global__ void accumulate_grad_broadcast(
-    double* target_grad,
-    const double* upstream_grad,
-    size_t total_elements,
-    BroadcastMeta meta,
-    bool is_lhs
-) {
-    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if (idx < total_elements) {
-        size_t target_flat = 0;
-        size_t temp = idx;
-
-        for (int d = static_cast<int>(meta.ndim) - 1; d >= 0; --d) {
-            size_t coord = temp % meta.out_shape[d];
-            target_flat += coord * (is_lhs ? meta.lhs_strides[d] : meta.rhs_strides[d]);
-            temp /= meta.out_shape[d];
-        }
-
-        atomicAdd(&target_grad[target_flat], upstream_grad[idx]);
+struct addRhsGradOp {
+    __device__ double operator()(double x, double y) const {
+        return 1.0;
     }
-}
+};
+
 
 // --- substraction (-)
 struct subForwardOp {
@@ -523,36 +506,21 @@ struct subForwardOp {
     }
 };
 
-// kernels for operator- backward pass
-__global__ void subtract_grad(double* target_grad, const double* upstream_grad, size_t total_elements){
-    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if(idx < total_elements){
-        target_grad[idx] -= upstream_grad[idx];
+// functors for derivative of operator-
+struct subLhsGradOp{
+    __device__ double operator()(double x, double y) const {
+        return 1.0;
     }
-}
+};
 
-// subtraction backward pass with broadcasting
-__global__ void subtract_grad_broadcast(
-    double* target_grad, 
-    const double* upstream_grad, 
-    size_t total_elements,
-    BroadcastMeta meta,
-    bool is_lhs
-){
-    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
-    if(idx < total_elements){
-        size_t target_flat = 0;
-        size_t temp = idx;
-
-        for(int d = static_cast<int>(meta.ndim) - 1; d >= 0; --d){
-            size_t coord = temp % meta.out_shape[d];
-            target_flat += coord * (is_lhs ? meta.lhs_strides[d] : meta.rhs_strides[d]);
-            temp /= meta.out_shape[d];
-        }
-
-        atomicAdd(&target_grad[target_flat], -upstream_grad[idx]);
+struct subRhsGradOp {
+    __device__ double operator()(double x, double y) const {
+        return -1.0;
     }
-}
+};
+
+// --- multiplier (*)
+
 
 
 // ---- templates
@@ -593,6 +561,56 @@ __global__ void binary_forward_broadcast(
     }
 }
 
+// ----
+
+// backward pass template
+// (matching shape)
+template <typename Op>
+__global__ void binary_backward(
+    double* target_grad,
+    const double* upstream_grad,
+    const double* lhs,
+    const double* rhs,
+    size_t total_elements,
+    Op local_grad_op
+) {
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if(idx < total_elements){
+        target_grad[idx] += upstream_grad[idx] * local_grad_op(lhs[idx], rhs[idx]);
+    }
+}
+
+// with broadcasting
+template <typename Op>
+__global__ void binary_backward_broadcast(
+    double* target_grad,
+    const double* upstream_grad,
+    const double* lhs,
+    const double* rhs,
+    size_t total_elements,
+    BroadcastMeta meta,
+    bool is_lhs,
+    Op local_grad_op
+) {
+    size_t idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx < total_elements) {
+        size_t flat_lhs = 0;
+        size_t flat_rhs = 0;
+        size_t temp = idx;
+
+        for (int d = static_cast<int>(meta.ndim) - 1; d >= 0; --d) {
+            size_t coord = temp % meta.out_shape[d];
+            flat_lhs += coord * meta.lhs_strides[d];
+            flat_rhs += coord * meta.rhs_strides[d];
+            temp /= meta.out_shape[d];
+        }
+
+        size_t target_flat = is_lhs ? flat_lhs : flat_rhs;
+        double local_grad  = local_grad_op(lhs[flat_lhs], rhs[flat_rhs]);
+
+        atomicAdd(&target_grad[target_flat], upstream_grad[idx] * local_grad);
+    }
+}
 
 // end of binary op kernels....
 // ---------------------------------
@@ -663,49 +681,35 @@ inline void launch_binary_forward_broadcast(
     CUDA_CHECK(cudaGetLastError());
 }
 
-// addition backward pass launchers
-inline void launch_accumulate_grad_broadcast(
+// binary backward (matching shape)
+template <typename Op>
+inline void launch_binary_backward(
     double* target_grad,
     const double* upstream_grad,
+    const double* lhs,
+    const double* rhs,
+    size_t total_elements,
+    Op local_grad_op
+) {
+    int blocks = cuda_utils::ceil_div(total_elements, threads);
+    binary_backward<<<blocks, threads>>>(target_grad, upstream_grad, lhs, rhs, total_elements, local_grad_op);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// binary backward with broadcasting
+template <typename Op>
+inline void launch_binary_backward_broadcast(
+    double* target_grad,
+    const double* upstream_grad,
+    const double* lhs,
+    const double* rhs,
     size_t total_elements,
     BroadcastMeta meta,
-    bool is_lhs
+    bool is_lhs,
+    Op local_grad_op
 ) {
     int blocks = cuda_utils::ceil_div(total_elements, threads);
-    accumulate_grad_broadcast<<<blocks, threads>>>(target_grad, upstream_grad, total_elements, meta, is_lhs);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-inline void launch_accumulate_grad(
-    double* target_grad,
-    const double* upstream_grad,
-    size_t total_elements
-) {
-    int blocks = cuda_utils::ceil_div(total_elements, threads);
-    accumulate_grad<<<blocks, threads>>>(target_grad, upstream_grad, total_elements);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-// substraction backward pass launchers
-inline void launch_subtract_grad(
-    double* target_grad,
-    const double* upstream_grad,
-    size_t total_elements
-) {
-    int blocks = cuda_utils::ceil_div(total_elements, threads);
-    subtract_grad<<<blocks, threads>>>(target_grad, upstream_grad, total_elements);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-inline void launch_subtract_grad_broadcast(
-    double* target_grad,
-    const double* upstream_grad,
-    size_t total_elements,
-    BroadcastMeta meta,
-    bool is_lhs
-) {
-    int blocks = cuda_utils::ceil_div(total_elements, threads);
-    subtract_grad_broadcast<<<blocks, threads>>>(target_grad, upstream_grad, total_elements, meta, is_lhs);
+    binary_backward_broadcast<<<blocks, threads>>>(target_grad, upstream_grad, lhs, rhs, total_elements, meta, is_lhs, local_grad_op);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -1000,32 +1004,52 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
                 // --- GPU backward pass
                 if(is_matching_shape){
                     if (lhs->requires_grad) {
-                        launch_accumulate_grad(lhs->cuda_grad, out_ptr->cuda_grad, total_elements);
+                        launch_binary_backward(
+                            lhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
+                            total_elements, 
+                            addLhsGradOp()
+                        );
                     }
                     if (rhs->requires_grad) {
-                        launch_accumulate_grad(rhs->cuda_grad, out_ptr->cuda_grad, total_elements);
+                        launch_binary_backward(
+                            rhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
+                            total_elements, 
+                            addRhsGradOp()
+                        );
                     }
 
                 } else {
                     // --- backward pass with broadcasting
                     BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
                     if(lhs->requires_grad){
-                        launch_accumulate_grad_broadcast(
+                        launch_binary_backward_broadcast(
                             lhs->cuda_grad, 
                             out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
                             total_elements, 
                             meta, 
-                            true
+                            true, 
+                            addLhsGradOp()
                         );
                     }
 
                     if(rhs->requires_grad){
-                        launch_accumulate_grad_broadcast(
+                        launch_binary_backward_broadcast(
                             rhs->cuda_grad, 
                             out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
                             total_elements, 
                             meta, 
-                            false
+                            false, 
+                            addRhsGradOp()
                         );
                     }
                 }
@@ -1134,32 +1158,52 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
                 // --- GPU backward pass
                 if(is_matching_shape) {
                     if(lhs->requires_grad){
-                        launch_accumulate_grad(lhs->cuda_grad, out_ptr->cuda_grad, total_elements); 
+                        launch_binary_backward(
+                            lhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
+                            total_elements, 
+                            subLhsGradOp()
+                        );
                     }
                     if(rhs->requires_grad){
-                        launch_subtract_grad(rhs->cuda_grad, out_ptr->cuda_grad, total_elements);
+                        launch_binary_backward(
+                            rhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
+                            total_elements, 
+                            subRhsGradOp()
+                        );
                     }
 
                 } else {
                     // --- backward pass with broadcasting
                     BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
                     if(lhs->requires_grad){
-                        launch_accumulate_grad_broadcast(
+                        launch_binary_backward_broadcast(
                             lhs->cuda_grad, 
                             out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
                             total_elements, 
                             meta, 
-                            true
+                            true, 
+                            subLhsGradOp()
                         );
                     }
 
                     if(rhs->requires_grad){
-                        launch_subtract_grad_broadcast(
+                        launch_binary_backward_broadcast(
                             rhs->cuda_grad, 
                             out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
                             total_elements, 
                             meta, 
-                            false
+                            false, 
+                            subRhsGradOp()
                         );
                     }
                 }
