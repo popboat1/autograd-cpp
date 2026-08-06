@@ -520,7 +520,65 @@ struct subRhsGradOp {
 };
 
 // --- multiplier (*)
+struct mulForwardOp {
+    __device__ double operator()(double x, double y) const {
+        return x * y;
+    }
+};
 
+// functors for derivative of operator*
+struct mulLhsGradOp {
+    __device__ double operator()(double x, double y) const {
+        return y;
+    } 
+};
+
+struct mulRhsGradOp {
+    __device__ double operator()(double x, double y) const {
+        return x;
+    }  
+};
+
+// --- scalar multiplication functors (actually this is unary)
+struct mulScalarForwardOp {
+    double scalar;
+    mulScalarForwardOp(double s) : scalar(s) {}
+
+    __device__ double operator()(double x) const {
+        return x * scalar;
+    }
+};
+
+struct mulScalarBackwardOp {
+    double scalar;
+    mulScalarBackwardOp(double s) : scalar(s) {}
+
+    __device__ double operator()(double x) const {
+        return scalar; // d(x * c)/dx = c
+    }
+};
+
+// --- division
+struct divForwardOp {
+    __device__ double operator()(double x, double y) {
+        return x / y;
+    }  
+};
+
+// functors for derivative of operator/
+// d(x / y) / dx = 1 / y
+struct divLhsGradOp {
+    __device__ double operator()(double x, double y) const {
+        return 1.0 / y;
+    }
+};
+
+// d(x / y) / dy = -x / (y * y)
+struct divRhsGradOp {
+    __device__ double operator()(double x, double y) const {
+        return -x / (y * y);
+    }
+};
 
 
 // ---- templates
@@ -1235,6 +1293,8 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
 
 // element wise operator
 TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
+    if (lhs->device != rhs->device) throw std::invalid_argument("Tensors must be on the same device");
+
     std::vector<size_t> out_shape;
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
@@ -1244,45 +1304,136 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
 
     // calculate total elements needed for the output data array
     size_t total_elements = 1;
-    for(size_t dim : out_shape){
-        total_elements *= dim;
-    }
-    std::vector<double> out_values(total_elements, 0.0);
+    for(size_t dim : out_shape) total_elements *= dim;
+
+    // determine device target
+    Device active_device = (lhs->device == Device::CUDA || rhs->device == Device::CUDA) ? Device::CUDA : Device::CPU;
+
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), out_shape, std::vector<TensorPtr>{lhs, rhs}, "*");
+    out->to(active_device);
+
+    bool is_matching_shape = (lhs->shape == rhs->shape) && lhs->is_contiguous() && rhs->is_contiguous();
 
     // forward pass
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_lhs = 0;
-        size_t flat_rhs = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % out_shape[d];
-            flat_lhs += coord * lhs_b_strides[d];
-            flat_rhs += coord * rhs_b_strides[d];
-            temp /= out_shape[d];
+    if(active_device == Device::CUDA){
+        // --- gpu
+        if(is_matching_shape){
+            launch_binary_forward(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                mulForwardOp()
+            );
+
+        } else {
+            // --- with broadcasting
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                meta,
+                mulForwardOp()
+            );
+
         }
-        out_values[i] = (*lhs->data)[flat_lhs] * (*rhs->data)[flat_rhs];
+    } else {
+        // --- cpu forward pass
+        double* out_ptr = out->data->data();
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0;
+            size_t flat_rhs = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
+            out_ptr[i] = (*lhs->data)[flat_lhs] * (*rhs->data)[flat_rhs];
+        }
     }
 
-    auto out = std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{lhs, rhs}, "*");
 
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements](){
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements, active_device, is_matching_shape](){
         if (auto out_ptr = weak_out.lock()){
-            std::vector<size_t> back_idx(out_shape.size(), 0);
 
-            for(size_t i {0}; i < total_elements; ++i){
-                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
-                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
-                
-                auto upstream_grad = (*out_ptr->grad)[i];
+            if(active_device == Device::CUDA){
+                // --- GPU backward pass
+                if(is_matching_shape){
+                    if(lhs->requires_grad){
+                        launch_binary_backward(
+                            lhs->cuda_grad,
+                            out_ptr->cuda_grad,
+                            lhs->cuda_data,
+                            rhs->cuda_data,
+                            total_elements,
+                            mulLhsGradOp()
+                        );
+                    }
+                    if(rhs->requires_grad){
+                        launch_binary_backward(
+                            rhs->cuda_grad,
+                            out_ptr->cuda_grad,
+                            lhs->cuda_data,
+                            rhs->cuda_data,
+                            total_elements,
+                            mulRhsGradOp()
+                        );
+                    }
 
-                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad * (*rhs->data)[flat_rhs];
-                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] += upstream_grad * (*lhs->data)[flat_lhs];
+                } else {
+                    // --- backward pass with broadcasting
+                    BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+                    if(lhs->requires_grad){
+                        launch_binary_backward_broadcast(
+                            lhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
+                            total_elements, 
+                            meta, 
+                            true, 
+                            mulLhsGradOp()
+                        );
+                    }
 
-                Tensor::advance_coordinates(back_idx, out_shape);
+                    if(rhs->requires_grad){
+                        launch_binary_backward_broadcast(
+                            rhs->cuda_grad, 
+                            out_ptr->cuda_grad, 
+                            lhs->cuda_data, 
+                            rhs->cuda_data, 
+                            total_elements, 
+                            meta, 
+                            false, 
+                            mulRhsGradOp()
+                        );
+                    }
+                }
+
+            } else {
+                std::vector<size_t> back_idx(out_shape.size(), 0);
+    
+                for(size_t i {0}; i < total_elements; ++i){
+                    size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                    size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                    
+                    auto upstream_grad = (*out_ptr->grad)[i];
+    
+                    if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad * (*rhs->data)[flat_rhs];
+                    if(rhs->requires_grad) (*rhs->grad)[flat_rhs] += upstream_grad * (*lhs->data)[flat_lhs];
+    
+                    Tensor::advance_coordinates(back_idx, out_shape);
+                }
             }
+            
         }
     };
 
@@ -1291,36 +1442,55 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
 
 // tensor * scalar ops
 TensorPtr operator*(const TensorPtr& lhs, double rhs) {
-    size_t total_elements = 1;
-    for (size_t s : lhs->shape) total_elements *= s;
+    auto active_lhs = lhs->is_contiguous() ? lhs : lhs->contiguous();
 
-    std::vector<double> out_values(total_elements);
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_idx = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(lhs->shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % lhs->shape[d];
-            flat_idx += coord * lhs->strides[d];
-            temp /= lhs->shape[d];
+    size_t total_elements = 1;
+    for (size_t s : active_lhs->shape) total_elements *= s;
+
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), active_lhs->shape, std::vector<TensorPtr>{active_lhs}, "*");
+    out->to(active_lhs->device);
+
+    // --- forward pass
+    if(active_lhs->device == Device::CUDA){
+        launch_unary_forward(
+            active_lhs->cuda_data,
+            out->cuda_data,
+            total_elements,
+            mulScalarForwardOp(rhs)
+        );
+    } else {
+        double* out_ptr = out->data->data();
+        const double* in_ptr = active_lhs->data->data();
+
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            out_ptr[i] = in_ptr[i] * rhs;
         }
-        out_values[i] = (*lhs->data)[flat_idx] * rhs;
     }
 
-    auto out = std::make_shared<Tensor>(out_values, lhs->shape, std::vector<TensorPtr>{lhs}, "*");
-
+    // --- backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, total_elements]() {
+    out->backward_func = [active_lhs, rhs, weak_out, total_elements]() {
         if (auto out_ptr = weak_out.lock()) {
-            if (lhs->requires_grad) {
-                std::vector<size_t> back_coords(lhs->shape.size(), 0);
+            if(active_lhs->requires_grad){
+
+                if(active_lhs->device == Device::CUDA){
+                    launch_unary_backward(
+                        out_ptr->cuda_grad,
+                        active_lhs->cuda_grad,
+                        active_lhs->cuda_data,
+                        total_elements,
+                        mulScalarBackwardOp(rhs)
+                    );
+                }
+            } else {
                 for (size_t i = 0; i < total_elements; ++i) {
-                    size_t flat_idx = lhs->get_flat_index(back_coords);
-                    (*lhs->grad)[flat_idx] += (*out_ptr->grad)[i] * rhs;
-                    Tensor::advance_coordinates(back_coords, lhs->shape);
+                    (*active_lhs->grad)[i] += (*out_ptr->grad)[i] * rhs;
                 }
             }
+
         }
     };
 
@@ -1328,11 +1498,13 @@ TensorPtr operator*(const TensorPtr& lhs, double rhs) {
 }
 
 TensorPtr operator*(double lhs, const TensorPtr& rhs) {
-    return rhs * lhs;
+    return rhs * lhs; // commutative routing gets GPU support automatically
 }
 
 // division op
 TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
+    if (lhs->device != rhs->device) throw std::invalid_argument("Tensors must be on the same device");
+
     std::vector<size_t> out_shape;
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
@@ -1342,52 +1514,130 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
 
     // calculate total elements needed for the output data array
     size_t total_elements = 1;
-    for (size_t dim : out_shape) {
-        total_elements *= dim;
-    }
-    std::vector<double> out_values(total_elements, 0.0);
+    for (size_t dim : out_shape) total_elements *= dim;
 
-    // forward pass
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_lhs = 0;
-        size_t flat_rhs = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % out_shape[d];
-            flat_lhs += coord * lhs_b_strides[d];
-            flat_rhs += coord * rhs_b_strides[d];
-            temp /= out_shape[d];
+    Device active_device = (lhs->device == Device::CUDA || rhs->device == Device::CUDA) ? Device::CUDA : Device::CPU;
+
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), out_shape, std::vector<TensorPtr>{lhs, rhs}, "/");
+    out->to(active_device);
+
+    bool is_matching_shape = (lhs->shape == rhs->shape) && lhs->is_contiguous() && rhs->is_contiguous();
+
+    // --- forward pass
+    if(active_device == Device::CUDA){
+        if (is_matching_shape) {
+            launch_binary_forward(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                divForwardOp()
+            );
+        } else{
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                lhs->cuda_data,
+                rhs->cuda_data,
+                out->cuda_data,
+                total_elements,
+                meta,
+                divForwardOp()
+            );
         }
-        // standard element-wise division
-        out_values[i] = (*lhs->data)[flat_lhs] / (*rhs->data)[flat_rhs];
+    } else {
+        double* out_ptr = out->data->data();
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0, flat_rhs = 0, temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
+            // standard element-wise division
+            out_ptr[i] = (*lhs->data)[flat_lhs] / (*rhs->data)[flat_rhs];
+        }
     }
 
-    auto out = std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{lhs, rhs}, "/");
 
-    // backward pass
+    // --- backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements]() {
+    out->backward_func = [lhs, rhs, weak_out, out_shape, lhs_b_strides, rhs_b_strides, total_elements, active_device, is_matching_shape]() {
         if (auto out_ptr = weak_out.lock()) {
-            std::vector<size_t> back_idx(out_shape.size(), 0);
-
-            for (size_t i = 0; i < total_elements; ++i) {
-                size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
-                size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
-                
-                auto upstream_grad = (*out_ptr->grad)[i];
-                double lhs_val = (*lhs->data)[flat_lhs];
-                double rhs_val = (*rhs->data)[flat_rhs];
-
-                // d(x/y) / dx = 1 / y
-                if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad / rhs_val;
-                
-                // d(x/y) / dy = -x / y^2
-                if(rhs->requires_grad) (*rhs->grad)[flat_rhs] -= upstream_grad * (lhs_val / (rhs_val * rhs_val));
-
-                Tensor::advance_coordinates(back_idx, out_shape);
+            
+            if(active_device == Device::CUDA){
+                if(is_matching_shape){
+                    if (lhs->requires_grad) {
+                        launch_binary_backward(
+                            lhs->cuda_grad,
+                            out_ptr->cuda_grad,
+                            lhs->cuda_data,
+                            rhs->cuda_data,
+                            total_elements,
+                            divLhsGradOp()
+                        );
+                    }
+                    if (rhs->requires_grad) {
+                        launch_binary_backward(
+                            rhs->cuda_grad,
+                            out_ptr->cuda_grad,
+                            lhs->cuda_data,
+                            rhs->cuda_data,
+                            total_elements,
+                            divRhsGradOp()
+                        );
+                    }
+                } else {
+                    BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+                    if (lhs->requires_grad) {
+                        launch_binary_backward_broadcast(
+                            lhs->cuda_grad,
+                            out_ptr->cuda_grad,
+                            lhs->cuda_data,
+                            rhs->cuda_data,
+                            total_elements,
+                            meta,
+                            true,
+                            divLhsGradOp()
+                        );
+                    }
+                    if (rhs->requires_grad) {
+                        launch_binary_backward_broadcast(
+                            rhs->cuda_grad,
+                            out_ptr->cuda_grad,
+                            lhs->cuda_data,
+                            rhs->cuda_data,
+                            total_elements,
+                            meta,
+                            false,
+                            divRhsGradOp()
+                        );
+                    }
+                }
+            } else {
+                // --- cpu backward pass
+                std::vector<size_t> back_idx(out_shape.size(), 0);
+                for (size_t i = 0; i < total_elements; ++i) {
+                    size_t flat_lhs = Tensor::get_flat_index_from_broadcast(back_idx, lhs_b_strides);
+                    size_t flat_rhs = Tensor::get_flat_index_from_broadcast(back_idx, rhs_b_strides);
+                    
+                    auto upstream_grad = (*out_ptr->grad)[i];
+                    double lhs_val = (*lhs->data)[flat_lhs];
+                    double rhs_val = (*rhs->data)[flat_rhs];
+    
+                    // d(x/y) / dx = 1 / y
+                    if(lhs->requires_grad) (*lhs->grad)[flat_lhs] += upstream_grad / rhs_val;
+                    
+                    // d(x/y) / dy = -x / y^2
+                    if(rhs->requires_grad) (*rhs->grad)[flat_rhs] -= upstream_grad * (lhs_val / (rhs_val * rhs_val));
+    
+                    Tensor::advance_coordinates(back_idx, out_shape);
+                }
             }
+            
         }
     };
 
@@ -2024,7 +2274,7 @@ TensorPtr Tensor::sigmoid(){
                 } else {
                     // CPU backward pass
                     for(size_t i = 0; i < total_elements; ++i){
-                        double s = (*self->data)[i];
+                        double s = 1.0 / (1.0 + std::exp(-(*self->data)[i]));
                         (*self->grad)[i] += (*out_ptr->grad)[i] * (s * (1.0 - s));
                     }
                 }
@@ -2208,7 +2458,7 @@ TensorPtr Tensor::sqrt(){
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
+    auto self = active_this;
 
     out->backward_func = [self, weak_out, total_elements]() {
         if (auto out_ptr = weak_out.lock()) {

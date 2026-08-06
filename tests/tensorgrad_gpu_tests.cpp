@@ -293,6 +293,142 @@ int main() {
         std::cout << "[PASS] operator- cuda broadcast path verified\n";
     }
 
+    // test 13: multiplication matching shape fast path on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0, 4.0}, std::vector<size_t>{3}, true);
+        auto b = std::make_shared<Tensor>(std::vector<double>{5.0, 6.0, 7.0}, std::vector<size_t>{3}, true);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = a * b;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 10.0));
+        assert(close_enough((*out->data)[1], 18.0));
+        assert(close_enough((*out->data)[2], 28.0));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+        b->to(Device::CPU);
+
+        // d(a*b)/da = b
+        assert(close_enough((*a->grad)[0], 5.0));
+        assert(close_enough((*a->grad)[1], 6.0));
+        assert(close_enough((*a->grad)[2], 7.0));
+
+        // d(a*b)/db = a
+        assert(close_enough((*b->grad)[0], 2.0));
+        assert(close_enough((*b->grad)[1], 3.0));
+        assert(close_enough((*b->grad)[2], 4.0));
+        std::cout << "[PASS] operator* cuda fast path verified\n";
+    }
+
+    // test 14: multiplication broadcasting path on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, std::vector<size_t>{2, 3}, true);
+        auto b = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0, 4.0}, std::vector<size_t>{3}, true);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = a * b;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 2.0));   // 1 * 2
+        assert(close_enough((*out->data)[2], 12.0));  // 3 * 4
+        assert(close_enough((*out->data)[3], 8.0));   // 4 * 2
+        assert(close_enough((*out->data)[5], 24.0));  // 6 * 4
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+        b->to(Device::CPU);
+
+        // a->grad gets b broadcasted: [[2, 3, 4], [2, 3, 4]]
+        assert(close_enough((*a->grad)[0], 2.0));
+        assert(close_enough((*a->grad)[2], 4.0));
+        assert(close_enough((*a->grad)[3], 2.0));
+        assert(close_enough((*a->grad)[5], 4.0));
+
+        // b->grad accumulates a across rows: [1+4, 2+5, 3+6] = [5.0, 7.0, 9.0]
+        assert(close_enough((*b->grad)[0], 5.0));
+        assert(close_enough((*b->grad)[1], 7.0));
+        assert(close_enough((*b->grad)[2], 9.0));
+        std::cout << "[PASS] operator* cuda broadcast path verified\n";
+    }
+
+    // test 15: tensor * scalar on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{2.0, -4.0, 3.0}, std::vector<size_t>{3}, true);
+        a->to(Device::CUDA);
+
+        auto out = a * 2.5;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 5.0));
+        assert(close_enough((*out->data)[1], -10.0));
+        assert(close_enough((*out->data)[2], 7.5));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+
+        // d(a * 2.5)/da = 2.5
+        assert(close_enough((*a->grad)[0], 2.5));
+        assert(close_enough((*a->grad)[1], 2.5));
+        assert(close_enough((*a->grad)[2], 2.5));
+        std::cout << "[PASS] tensor * scalar cuda pass verified\n";
+    }
+
+    // test 16: scalar * tensor on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 4.0}, std::vector<size_t>{2}, true);
+        a->to(Device::CUDA);
+
+        auto out = 3.0 * a;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 3.0));
+        assert(close_enough((*out->data)[1], 12.0));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+
+        // d(3.0 * a)/da = 3.0
+        assert(close_enough((*a->grad)[0], 3.0));
+        assert(close_enough((*a->grad)[1], 3.0));
+        std::cout << "[PASS] scalar * tensor cuda pass verified\n";
+    }
+
+    // test 17: division on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 12.0}, std::vector<size_t>{2}, true);
+        auto b = std::make_shared<Tensor>(std::vector<double>{2.0, 4.0}, std::vector<size_t>{2}, true);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = a / b;
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 5.0));
+        assert(close_enough((*out->data)[1], 3.0));
+
+        out->to(Device::CUDA);
+        out->backward();
+        a->to(Device::CPU);
+        b->to(Device::CPU);
+
+        // d(a/b)/da = 1 / b -> [0.5, 0.25]
+        assert(close_enough((*a->grad)[0], 0.5));
+        assert(close_enough((*a->grad)[1], 0.25));
+
+        // d(a/b)/db = -a / (b^2) -> [-10/4, -12/16] = [-2.5, -0.75]
+        assert(close_enough((*b->grad)[0], -2.5));
+        assert(close_enough((*b->grad)[1], -0.75));
+        std::cout << "[PASS] operator/ cuda pass verified\n";
+    }
+
     std::cout << "[PASS] all gpu tests passed cleanly\n";
     return 0;
 }
