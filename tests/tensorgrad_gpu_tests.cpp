@@ -178,6 +178,9 @@ int main() {
         std::cout << "[PASS] neg cuda pass verified\n";
     }
     std::cout << "[PASS] all unary kernels verified\n";
+    std::cout << "------------------------------------------\n";
+
+    std::cout << "starting binary kernels test...\n";
 
     // test 9: addition matching shape fast path on gpu
     {
@@ -427,6 +430,39 @@ int main() {
         assert(close_enough((*b->grad)[0], -2.5));
         assert(close_enough((*b->grad)[1], -0.75));
         std::cout << "[PASS] operator/ cuda pass verified\n";
+    }
+
+    // test 18: in-place addition (add_) on gpu
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, false);
+        auto b = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0}, std::vector<size_t>{3}, false);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        a->add_(b);
+
+        a->to(Device::CPU);
+        assert(close_enough((*a->data)[0], 11.0));
+        assert(close_enough((*a->data)[1], 22.0));
+        assert(close_enough((*a->data)[2], 33.0));
+        std::cout << "[PASS] in-place add_ cuda pass verified\n";
+    }
+
+    // test 19: in-place subtraction (sub_) on gpu with broadcasting
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, std::vector<size_t>{2, 3}, false);
+        auto b = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, false);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        a->sub_(b);
+
+        a->to(Device::CPU);
+        assert(close_enough((*a->data)[0], 9.0));
+        assert(close_enough((*a->data)[2], 27.0));
+        assert(close_enough((*a->data)[3], 39.0));
+        assert(close_enough((*a->data)[5], 57.0));
+        std::cout << "[PASS] in-place sub_ cuda broadcast pass verified\n";
     }
 
     std::cout << "[PASS] all gpu tests passed cleanly\n";

@@ -855,6 +855,10 @@ void Tensor::zero_grad() {
 
 // in-place addition supporting standard fast-paths and multi-dimensional coordinate loops
 TensorPtr Tensor::add_(const TensorPtr& other) {
+    if(this->device != other->device){
+        throw std::invalid_argument("Tensors must be on the same device");
+    }
+
     // copy-on-write layout materialization to protect shared views and autograd history
     if (!is_contiguous() || data.use_count() > 1) {
         size_t total_elements = 1;
@@ -875,7 +879,6 @@ TensorPtr Tensor::add_(const TensorPtr& other) {
         }
         
         data = std::make_shared<std::vector<double>>(contiguous_values);
-        
         strides.resize(shape.size(), 1);
         if (!shape.empty()) {
             for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
@@ -884,42 +887,72 @@ TensorPtr Tensor::add_(const TensorPtr& other) {
         }
     }
 
-    if (is_contiguous() && other->is_contiguous() && shape == other->shape) {
-        for (size_t i = 0; i < data->size(); ++i) {
-            (*data)[i] += (*other->data)[i];
+    std::vector<size_t> out_shape;
+    std::vector<size_t> lhs_b_strides;
+    std::vector<size_t> rhs_b_strides;
+    compute_broadcast_metadata(shared_from_this(), other, out_shape, lhs_b_strides, rhs_b_strides);
+
+    if (out_shape != this->shape) {
+        throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
+    }
+
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    bool is_matching_shape = (lhs_b_strides == rhs_b_strides) && other->is_contiguous();
+
+    if(this->device == Device::CUDA){
+        // --- gpu execution
+        if(is_matching_shape){
+            launch_binary_forward(
+                this->cuda_data,
+                other->cuda_data,
+                this->cuda_data,
+                total_elements,
+                addForwardOp()
+            );
+        } else{
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                this->cuda_data,
+                other->cuda_data,
+                this->cuda_data,
+                total_elements,
+                meta,
+                addForwardOp()
+            );
         }
     } else {
-        std::vector<size_t> out_shape;
-        std::vector<size_t> lhs_b_strides;
-        std::vector<size_t> rhs_b_strides;
-        compute_broadcast_metadata(shared_from_this(), other, out_shape, lhs_b_strides, rhs_b_strides);
-        
-        if (out_shape != this->shape) {
-            throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
-        }
-        
-        size_t total_elements = data->size();
-        
-        // stateless coordinate resolution for safe parallelization
-        #pragma omp parallel for
-        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-            size_t flat_lhs = 0;
-            size_t flat_rhs = 0;
-            size_t temp = i;
-            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-                size_t coord = temp % out_shape[d];
-                flat_lhs += coord * lhs_b_strides[d];
-                flat_rhs += coord * rhs_b_strides[d];
-                temp /= out_shape[d];
+        // --- cpu execution
+        if(is_matching_shape) {
+            for(size_t i = 0; i < data->size(); ++i){
+                (*data)[i] += (*other->data)[i];
             }
-            (*data)[flat_lhs] += (*other->data)[flat_rhs];
+        } else {
+            // stateless coordinate resolution for safe parallelization
+            #pragma omp parallel for
+            for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+                size_t flat_lhs = 0, flat_rhs = 0, temp = i;
+                for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                    size_t coord = temp % out_shape[d];
+                    flat_lhs += coord * lhs_b_strides[d];
+                    flat_rhs += coord * rhs_b_strides[d];
+                    temp /= out_shape[d];
+                }
+                (*data)[flat_lhs] += (*other->data)[flat_rhs];
+            }
         }
     }
+
     return shared_from_this();
 }
 
 // in-place substraction
 TensorPtr Tensor::sub_(const TensorPtr& other) {
+    if(this->device != other->device){
+        throw std::invalid_argument("Tensors must be on the same device");
+    }
+
     // copy-on-write layout materialization to protect shared views and autograd history
     if (!is_contiguous() || data.use_count() > 1) {
         size_t total_elements = 1;
@@ -940,7 +973,6 @@ TensorPtr Tensor::sub_(const TensorPtr& other) {
         }
         
         data = std::make_shared<std::vector<double>>(contiguous_values);
-        
         strides.resize(shape.size(), 1);
         if (!shape.empty()) {
             for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
@@ -949,37 +981,62 @@ TensorPtr Tensor::sub_(const TensorPtr& other) {
         }
     }
 
-    if (is_contiguous() && other->is_contiguous() && shape == other->shape) {
-        for (size_t i = 0; i < data->size(); ++i) {
-            (*data)[i] -= (*other->data)[i];
+    std::vector<size_t> out_shape, lhs_b_strides, rhs_b_strides;
+    compute_broadcast_metadata(shared_from_this(), other, out_shape, lhs_b_strides, rhs_b_strides);
+
+    if (out_shape != this->shape) {
+        throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
+    }
+
+    size_t total_elements = 1;
+    for (size_t s : shape) total_elements *= s;
+
+    bool is_matching_shape = (lhs_b_strides == rhs_b_strides) && other->is_contiguous();
+
+    if(this->device==Device::CUDA){
+        // --- gpu execution
+        if(is_matching_shape){
+            launch_binary_forward(
+                this->cuda_data,
+                other->cuda_data,
+                this->cuda_data,
+                total_elements,
+                subForwardOp()
+            );
+        } else {
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                this->cuda_data,
+                other->cuda_data,
+                this->cuda_data,
+                total_elements,
+                meta,
+                subForwardOp()
+            );
         }
     } else {
-        std::vector<size_t> out_shape;
-        std::vector<size_t> lhs_b_strides;
-        std::vector<size_t> rhs_b_strides;
-        compute_broadcast_metadata(shared_from_this(), other, out_shape, lhs_b_strides, rhs_b_strides);
-        
-        if (out_shape != this->shape) {
-            throw std::invalid_argument("In-place targets cannot be expanded via broadcasting.");
-        }
-        
-        size_t total_elements = data->size();
-        
-        // stateless coordinate resolution for safe parallelization
-        #pragma omp parallel for
-        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-            size_t flat_lhs = 0;
-            size_t flat_rhs = 0;
-            size_t temp = i;
-            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-                size_t coord = temp % out_shape[d];
-                flat_lhs += coord * lhs_b_strides[d];
-                flat_rhs += coord * rhs_b_strides[d];
-                temp /= out_shape[d];
+        // --- cpu exec
+        if(is_matching_shape){
+            for(size_t i = 0; i < data->size(); ++i){
+                (*data)[i] -= (*other->data)[i];
             }
-            (*data)[flat_lhs] -= (*other->data)[flat_rhs];
+        } else {
+            // stateless coordinate resolution for safe parallelization
+            #pragma omp parallel for
+            for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+                size_t flat_lhs = 0, flat_rhs = 0, temp = i;
+                for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                    size_t coord = temp % out_shape[d];
+                    flat_lhs += coord * lhs_b_strides[d];
+                    flat_rhs += coord * rhs_b_strides[d];
+                    temp /= out_shape[d];
+                }
+                (*data)[flat_lhs] -= (*other->data)[flat_rhs];
+            }
         }
     }
+
+    
     return shared_from_this();
 }
 
@@ -1637,7 +1694,7 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
                     Tensor::advance_coordinates(back_idx, out_shape);
                 }
             }
-            
+
         }
     };
 
