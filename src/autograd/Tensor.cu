@@ -581,6 +581,28 @@ struct divRhsGradOp {
 };
 
 
+// ----- comparison ops
+// equals to
+struct eqForwardOp {
+    __device__ double operator()(double x, double y) const {
+        return (x == y) ? 1.0 : 0.0;
+    }
+};
+
+// less than
+struct ltForwardOp {
+    __device__ double operator()(double x, double y) const {
+        return (x < y) ? 1.0 : 0.0;
+    }
+};
+
+// greater than
+struct gtForwardOp {
+    __device__ double operator()(double x, double y) const {
+        return (x > y) ? 1.0 : 0.0;
+    }
+};
+
 // ---- templates
 // forward pass template
 template <typename Op>
@@ -1036,7 +1058,7 @@ TensorPtr Tensor::sub_(const TensorPtr& other) {
         }
     }
 
-    
+
     return shared_from_this();
 }
 
@@ -3078,8 +3100,15 @@ TensorPtr Tensor::permute(const std::vector<size_t>& dims) {
     return out;
 }
 
+
+// ------------------------------
+// binary comparison operators
+// ------------------------------
+
 // equals to comparison
 TensorPtr operator==(const Tensor& lhs, const Tensor& rhs) {
+    if (lhs.device != rhs.device) throw std::invalid_argument("Tensors must be on the same device for comparison.");
+
     std::vector<size_t> out_shape;
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
@@ -3094,28 +3123,61 @@ TensorPtr operator==(const Tensor& lhs, const Tensor& rhs) {
 
     size_t total_elements = 1;
     for (size_t dim : out_shape) total_elements *= dim;
-    std::vector<double> out_values(total_elements);
 
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_lhs = 0;
-        size_t flat_rhs = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % out_shape[d];
-            flat_lhs += coord * lhs_b_strides[d];
-            flat_rhs += coord * rhs_b_strides[d];
-            temp /= out_shape[d];
+    Device active_device = lhs.device;
+    
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), out_shape, std::vector<TensorPtr>{}, "==");
+    out->to(active_device);
+    
+    bool is_matching_shape = (lhs.shape == rhs.shape) && lhs.is_contiguous() && rhs.is_contiguous();
+
+    if(active_device == Device::CUDA){
+        // --- gpu execution
+        if(is_matching_shape){
+            launch_binary_forward(
+                lhs.cuda_data,
+                rhs.cuda_data,
+                out->cuda_data,
+                total_elements,
+                eqForwardOp()
+            );
+        } else {
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                lhs.cuda_data,
+                rhs.cuda_data,
+                out->cuda_data,
+                total_elements,
+                meta,
+                eqForwardOp()
+            );
         }
-        out_values[i] = ((*lhs.data)[flat_lhs] == (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
-    }
 
-    return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, "==");
+    } else {
+        // --- cpu execution
+        double* out_ptr = out->data->data();
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0, flat_rhs = 0, temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
+            out_ptr[i] = ((*lhs.data)[flat_lhs] == (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+        }
+    }
+    
+    return out;
 }
 
 // less than comparison
 TensorPtr operator<(const Tensor& lhs, const Tensor& rhs) {
+    if (lhs.device != rhs.device) throw std::invalid_argument("Tensors must be on the same device.");
+
     std::vector<size_t> out_shape;
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
@@ -3129,28 +3191,61 @@ TensorPtr operator<(const Tensor& lhs, const Tensor& rhs) {
 
     size_t total_elements = 1;
     for (size_t dim : out_shape) total_elements *= dim;
-    std::vector<double> out_values(total_elements);
 
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_lhs = 0;
-        size_t flat_rhs = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % out_shape[d];
-            flat_lhs += coord * lhs_b_strides[d];
-            flat_rhs += coord * rhs_b_strides[d];
-            temp /= out_shape[d];
+    Device active_device = lhs.device;
+
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), out_shape, std::vector<TensorPtr>{}, "<");
+    out->to(active_device);
+
+    bool is_matching_shape = (lhs.shape == rhs.shape) && lhs.is_contiguous() && rhs.is_contiguous();
+
+    if(active_device == Device::CUDA){
+        // --- gpu exec
+        if(is_matching_shape){
+            launch_binary_forward(
+                lhs.cuda_data,
+                rhs.cuda_data,
+                out->cuda_data,
+                total_elements,
+                ltForwardOp()
+            );
+        } else {
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                lhs.cuda_data,
+                rhs.cuda_data,
+                out->cuda_data,
+                total_elements,
+                meta,
+                ltForwardOp()
+            );
         }
-        out_values[i] = ((*lhs.data)[flat_lhs] < (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+    } else{
+        // -- cpu exec
+        double* out_ptr = out->data->data();
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0, flat_rhs = 0, temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
+            out_ptr[i] = ((*lhs.data)[flat_lhs] < (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+        }
     }
 
-    return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, "<");
+
+    return out;
 }
 
 // greater than comparison
 TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
+    if (lhs.device != rhs.device) throw std::invalid_argument("Tensors must be on the same device.");
+
     std::vector<size_t> out_shape;
     std::vector<size_t> lhs_b_strides;
     std::vector<size_t> rhs_b_strides;
@@ -3164,25 +3259,61 @@ TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
 
     size_t total_elements = 1;
     for (size_t dim : out_shape) total_elements *= dim;
-    std::vector<double> out_values(total_elements);
 
-    // stateless coordinate resolution for safe parallelization
-    #pragma omp parallel for
-    for (int i = 0; i < static_cast<int>(total_elements); ++i) {
-        size_t flat_lhs = 0;
-        size_t flat_rhs = 0;
-        size_t temp = i;
-        for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
-            size_t coord = temp % out_shape[d];
-            flat_lhs += coord * lhs_b_strides[d];
-            flat_rhs += coord * rhs_b_strides[d];
-            temp /= out_shape[d];
+    Device active_device = lhs.device;
+
+    std::vector<double> dummy_vals(total_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), out_shape, std::vector<TensorPtr>{}, ">");
+    out->to(active_device);
+
+    bool is_matching_shape = (lhs.shape == rhs.shape) && lhs.is_contiguous() && rhs.is_contiguous();
+
+    if(active_device == Device::CUDA){
+        if(is_matching_shape){
+            launch_binary_forward(
+                lhs.cuda_data,
+                rhs.cuda_data,
+                out->cuda_data,
+                total_elements,
+                gtForwardOp()
+            );
+        } else {
+            BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
+            launch_binary_forward_broadcast(
+                lhs.cuda_data,
+                rhs.cuda_data,
+                out->cuda_data,
+                total_elements,
+                meta,
+                gtForwardOp()
+            );
         }
-        out_values[i] = ((*lhs.data)[flat_lhs] > (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+    } else {
+        double* out_ptr = out->data->data();
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+            size_t flat_lhs = 0;
+            size_t flat_rhs = 0;
+            size_t temp = i;
+            for (int d = static_cast<int>(out_shape.size()) - 1; d >= 0; --d) {
+                size_t coord = temp % out_shape[d];
+                flat_lhs += coord * lhs_b_strides[d];
+                flat_rhs += coord * rhs_b_strides[d];
+                temp /= out_shape[d];
+            }
+            out_ptr[i] = ((*lhs.data)[flat_lhs] > (*rhs.data)[flat_rhs]) ? 1.0 : 0.0;
+        }
     }
 
-    return std::make_shared<Tensor>(out_values, out_shape, std::vector<TensorPtr>{}, ">");
+    return out;
 }
+
+
+// end of comparison ops...
+// -----------------------------------
+
+
 
 // explicitly expands tensor dimensions along singleton axes via zero-copy stride mapping
 TensorPtr Tensor::expand(const std::vector<size_t>& new_shape){

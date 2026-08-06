@@ -465,6 +465,66 @@ int main() {
         std::cout << "[PASS] in-place sub_ cuda broadcast pass verified\n";
     }
 
+    // test 20: operator== on gpu with broadcasting
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, std::vector<size_t>{2, 3}, false);
+        auto b = std::make_shared<Tensor>(std::vector<double>{1.0, 9.0, 3.0}, std::vector<size_t>{3}, false);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = (*a == *b);
+
+        out->to(Device::CPU);
+        // Row 0: [1==1 (1), 2==9 (0), 3==3 (1)]
+        assert(close_enough((*out->data)[0], 1.0));
+        assert(close_enough((*out->data)[1], 0.0));
+        assert(close_enough((*out->data)[2], 1.0));
+
+        // Row 1: [4==1 (0), 5==9 (0), 6==3 (0)]
+        assert(close_enough((*out->data)[3], 0.0));
+        assert(close_enough((*out->data)[4], 0.0));
+        assert(close_enough((*out->data)[5], 0.0));
+        std::cout << "[PASS] operator== cuda broadcast pass verified\n";
+    }
+
+    // test 21: operator< on gpu with broadcasting
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 5.0, 2.0}, std::vector<size_t>{3}, false);
+        auto b = std::make_shared<Tensor>(std::vector<double>{3.0, 3.0, 3.0}, std::vector<size_t>{3}, false);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = (*a < *b);
+
+        out->to(Device::CPU);
+        assert(close_enough((*out->data)[0], 1.0)); // 1 < 3 -> 1.0
+        assert(close_enough((*out->data)[1], 0.0)); // 5 < 3 -> 0.0
+        assert(close_enough((*out->data)[2], 1.0)); // 2 < 3 -> 1.0
+        std::cout << "[PASS] operator< cuda pass verified\n";
+    }
+
+    // test 22: operator> on gpu with broadcasting
+    {
+        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, std::vector<size_t>{2, 3}, false);
+        auto b = std::make_shared<Tensor>(std::vector<double>{15.0, 20.0, 25.0}, std::vector<size_t>{3}, false);
+        a->to(Device::CUDA);
+        b->to(Device::CUDA);
+
+        auto out = (*a > *b);
+
+        out->to(Device::CPU);
+        // Row 0: [10>15 (0), 20>20 (0), 30>25 (1)]
+        assert(close_enough((*out->data)[0], 0.0));
+        assert(close_enough((*out->data)[1], 0.0));
+        assert(close_enough((*out->data)[2], 1.0));
+
+        // Row 1: [40>15 (1), 50>20 (1), 60>25 (1)]
+        assert(close_enough((*out->data)[3], 1.0));
+        assert(close_enough((*out->data)[4], 1.0));
+        assert(close_enough((*out->data)[5], 1.0));
+        std::cout << "[PASS] operator> cuda broadcast pass verified\n";
+    }
+
     std::cout << "[PASS] all gpu tests passed cleanly\n";
     return 0;
 }
