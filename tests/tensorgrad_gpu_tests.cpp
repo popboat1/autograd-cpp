@@ -2,6 +2,9 @@
 #include <vector>
 #include <cassert>
 #include <cmath>
+#include <chrono>
+#include <iomanip>
+#include <cuda_runtime.h>
 #include "autograd/Tensor.h"
 
 // helper to assert floating point parity smoothly
@@ -9,522 +12,930 @@ bool close_enough(double a, double b, double tol = 1e-4) {
     return std::abs(a - b) < tol;
 }
 
+// helper timer to isolate and measure GPU execution latency accurately
+struct CudaTimer {
+    std::chrono::high_resolution_clock::time_point start_time;
+
+    void start() {
+        cudaDeviceSynchronize();
+        start_time = std::chrono::high_resolution_clock::now();
+    }
+
+    double stop_ms() {
+        cudaDeviceSynchronize();
+        auto end_time = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    }
+};
+
+// helper to generate deterministic synthetic 4D data
+std::vector<double> generate_4d_data(size_t total_elements, double offset = 0.0, double scale = 1.0) {
+    std::vector<double> values(total_elements);
+    for (size_t i = 0; i < total_elements; ++i) {
+        values[i] = (std::sin(static_cast<double>(i) * 0.05) * 10.0 + offset) * scale;
+    }
+    return values;
+}
+
 int main() {
+    std::cout << std::fixed << std::setprecision(3);
+    CudaTimer timer;
+
+    // Standard 4D Tensor dimensions for test suite: (4, 8, 16, 32) = 16,384 elements
+    const std::vector<size_t> shape_4d = {4, 8, 16, 32};
+    const size_t num_elements = 4 * 8 * 16 * 32;
+
+    std::cout << "==========================================\n";
     std::cout << "starting tensorgrad gpu unary tests\n";
+    std::cout << "==========================================\n";
 
-    // test 1: relu forward and backward on gpu
+    // test 1: relu forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{-2.0, 0.0, 3.0}, std::vector<size_t>{3}, true);
-        x->to(Device::CUDA);
-        auto out = x->relu();
-        
-        // copy to cpu to verify forward calculations
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 0.0));
-        assert(close_enough((*out->data)[1], 0.0));
-        assert(close_enough((*out->data)[2], 3.0));
+        auto raw_data = generate_4d_data(num_elements, -2.0);
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        // push back to gpu and trigger backward pass
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        auto out_cpu = x_cpu->relu();
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        assert(close_enough((*x->grad)[0], 0.0));
-        assert(close_enough((*x->grad)[1], 0.0));
-        assert(close_enough((*x->grad)[2], 1.0));
-        std::cout << "[PASS] relu cuda pass verified\n";
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->relu();
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] relu cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 2: exp forward and backward on gpu
+    // test 2: exp forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{0.0, 1.0, 2.0}, std::vector<size_t>{3}, true);
-        x->to(Device::CUDA);
-        auto out = x->exp();
+        auto raw_data = generate_4d_data(num_elements, 0.0, 0.1); // bounded range to prevent overflow
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 1.0));
-        assert(close_enough((*out->data)[1], std::exp(1.0)));
-        assert(close_enough((*out->data)[2], std::exp(2.0)));
+        auto out_cpu = x_cpu->exp();
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->exp();
+        double fwd_time = timer.stop_ms();
 
-        assert(close_enough((*x->grad)[0], 1.0));
-        assert(close_enough((*x->grad)[1], std::exp(1.0)));
-        assert(close_enough((*x->grad)[2], std::exp(2.0)));
-        std::cout << "[PASS] exp cuda pass verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] exp cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 3: tanh forward and backward on gpu
+    // test 3: tanh forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{0.0, 0.5}, std::vector<size_t>{2}, true);
-        x->to(Device::CUDA);
-        auto out = x->tanh();
+        auto raw_data = generate_4d_data(num_elements, 0.0, 0.5);
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        double t0 = std::tanh(0.0);
-        double t1 = std::tanh(0.5);
-        assert(close_enough((*out->data)[0], t0));
-        assert(close_enough((*out->data)[1], t1));
+        auto out_cpu = x_cpu->tanh();
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->tanh();
+        double fwd_time = timer.stop_ms();
 
-        assert(close_enough((*x->grad)[0], 1.0 - t0 * t0));
-        assert(close_enough((*x->grad)[1], 1.0 - t1 * t1));
-        std::cout << "[PASS] tanh cuda pass verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] tanh cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 4: sigmoid forward and backward on gpu
+    // test 4: sigmoid forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{0.0, 2.0}, std::vector<size_t>{2}, true);
-        x->to(Device::CUDA);
-        auto out = x->sigmoid();
+        auto raw_data = generate_4d_data(num_elements, 0.0, 0.5);
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        double s0 = 1.0 / (1.0 + std::exp(0.0));
-        double s1 = 1.0 / (1.0 + std::exp(-2.0));
-        assert(close_enough((*out->data)[0], s0));
-        assert(close_enough((*out->data)[1], s1));
+        auto out_cpu = x_cpu->sigmoid();
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->sigmoid();
+        double fwd_time = timer.stop_ms();
 
-        assert(close_enough((*x->grad)[0], s0 * (1.0 - s0)));
-        assert(close_enough((*x->grad)[1], s1 * (1.0 - s1)));
-        std::cout << "[PASS] sigmoid cuda pass verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] sigmoid cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 5: log forward and backward on gpu
+    // test 5: log forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 10.0}, std::vector<size_t>{3}, true);
-        x->to(Device::CUDA);
-        auto out = x->log();
+        auto raw_data = generate_4d_data(num_elements, 12.0, 1.0); // positive domain x > 0
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 0.0));
-        assert(close_enough((*out->data)[1], std::log(2.0)));
-        assert(close_enough((*out->data)[2], std::log(10.0)));
+        auto out_cpu = x_cpu->log();
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->log();
+        double fwd_time = timer.stop_ms();
 
-        assert(close_enough((*x->grad)[0], 1.0));
-        assert(close_enough((*x->grad)[1], 0.5));
-        assert(close_enough((*x->grad)[2], 0.1));
-        std::cout << "[PASS] log cuda pass verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] log cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 6: pow forward and backward on gpu
+    // test 6: pow forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0}, std::vector<size_t>{2}, true);
-        x->to(Device::CUDA);
-        auto out = x->pow(3.0);
+        auto raw_data = generate_4d_data(num_elements, 5.0, 0.5);
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 8.0));
-        assert(close_enough((*out->data)[1], 27.0));
+        auto out_cpu = x_cpu->pow(3.0);
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->pow(3.0);
+        double fwd_time = timer.stop_ms();
 
-        // d(x^3)/dx = 3 * x^2
-        assert(close_enough((*x->grad)[0], 12.0));
-        assert(close_enough((*x->grad)[1], 27.0));
-        std::cout << "[PASS] pow cuda pass verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] pow cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 7: sqrt forward and backward on gpu
+    // test 7: sqrt forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{4.0, 16.0}, std::vector<size_t>{2}, true);
-        x->to(Device::CUDA);
-        auto out = x->sqrt();
+        auto raw_data = generate_4d_data(num_elements, 15.0, 1.0); // non-negative domain
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 2.0));
-        assert(close_enough((*out->data)[1], 4.0));
+        auto out_cpu = x_cpu->sqrt();
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->sqrt();
+        double fwd_time = timer.stop_ms();
 
-        // d(sqrt(x))/dx = 0.5 / sqrt(x)
-        assert(close_enough((*x->grad)[0], 0.25));
-        assert(close_enough((*x->grad)[1], 0.125));
-        std::cout << "[PASS] sqrt cuda pass verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] sqrt cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 8: neg / prefix operator- forward and backward on gpu
+    // test 8: neg / prefix operator- forward and backward on gpu tensor
     {
-        auto x = std::make_shared<Tensor>(std::vector<double>{1.5, -4.0}, std::vector<size_t>{2}, true);
-        x->to(Device::CUDA);
-        auto out = -x;
+        auto raw_data = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_data, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], -1.5));
-        assert(close_enough((*out->data)[1], 4.0));
+        auto out_cpu = -x_cpu;
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        x->to(Device::CPU);
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = -x_gpu;
+        double fwd_time = timer.stop_ms();
 
-        assert(close_enough((*x->grad)[0], -1.0));
-        assert(close_enough((*x->grad)[1], -1.0));
-        std::cout << "[PASS] neg cuda pass verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] neg cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
+
     std::cout << "[PASS] all unary kernels verified\n";
     std::cout << "------------------------------------------\n";
 
     std::cout << "starting binary kernels test...\n";
 
-    // test 9: addition matching shape fast path on gpu
+    // test 9: addition matching shape fast path on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, true);
-        auto b = std::make_shared<Tensor>(std::vector<double>{4.0, 5.0, 6.0}, std::vector<size_t>{3}, true);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        auto a_raw = generate_4d_data(num_elements, 2.0);
+        auto b_raw = generate_4d_data(num_elements, 5.0);
 
-        auto out = a + b;
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 5.0));
-        assert(close_enough((*out->data)[1], 7.0));
-        assert(close_enough((*out->data)[2], 9.0));
+        auto out_cpu = a_cpu + b_cpu;
+        a_cpu->ensure_grad_allocated();
+        b_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
-        b->to(Device::CPU);
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu + b_gpu;
+        double fwd_time = timer.stop_ms();
 
-        assert(close_enough((*a->grad)[0], 1.0));
-        assert(close_enough((*a->grad)[2], 1.0));
-        assert(close_enough((*b->grad)[0], 1.0));
-        assert(close_enough((*b->grad)[2], 1.0));
-        std::cout << "[PASS] operator+ cuda fast path verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        b_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] operator+ cuda fast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 10: addition broadcasting path on gpu
+    // test 10: addition broadcasting path on gpu tensor (4D + 2D broadcast)
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, std::vector<size_t>{2, 3}, true);
-        auto b = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0}, std::vector<size_t>{3}, true);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        const std::vector<size_t> b_shape = {16, 32}; // broadcast across B and C axes
+        size_t b_elements = 16 * 32;
 
-        auto out = a + b;
+        auto a_raw = generate_4d_data(num_elements, 1.0);
+        auto b_raw = generate_4d_data(b_elements, 10.0);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 11.0));
-        assert(close_enough((*out->data)[2], 33.0));
-        assert(close_enough((*out->data)[3], 14.0));
-        assert(close_enough((*out->data)[5], 36.0));
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, b_shape, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, b_shape, true, Device::CPU);
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
-        b->to(Device::CPU);
+        auto out_cpu = a_cpu + b_cpu;
+        a_cpu->ensure_grad_allocated();
+        b_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        // a receives 1.0 for each element
-        assert(close_enough((*a->grad)[0], 1.0));
-        assert(close_enough((*a->grad)[5], 1.0));
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu + b_gpu;
+        double fwd_time = timer.stop_ms();
 
-        // b is broadcasted across 2 rows, so gradients accumulate to 2.0
-        assert(close_enough((*b->grad)[0], 2.0));
-        assert(close_enough((*b->grad)[1], 2.0));
-        assert(close_enough((*b->grad)[2], 2.0));
-        std::cout << "[PASS] operator+ cuda broadcast path verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        b_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+        }
+        for (size_t i = 0; i < b_elements; ++i) {
+            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] operator+ cuda broadcast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 11: subtraction matching shape fast path on gpu
+    // test 11: subtraction matching shape fast path on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{5.0, 8.0, 12.0}, std::vector<size_t>{3}, true);
-        auto b = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0, 4.0}, std::vector<size_t>{3}, true);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        auto a_raw = generate_4d_data(num_elements, 10.0);
+        auto b_raw = generate_4d_data(num_elements, 3.0);
 
-        auto out = a - b;
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 3.0));
-        assert(close_enough((*out->data)[1], 5.0));
-        assert(close_enough((*out->data)[2], 8.0));
+        auto out_cpu = a_cpu - b_cpu;
+        a_cpu->ensure_grad_allocated();
+        b_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
-        b->to(Device::CPU);
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu - b_gpu;
+        double fwd_time = timer.stop_ms();
 
-        assert(close_enough((*a->grad)[0], 1.0));
-        assert(close_enough((*a->grad)[2], 1.0));
-        assert(close_enough((*b->grad)[0], -1.0));
-        assert(close_enough((*b->grad)[2], -1.0));
-        std::cout << "[PASS] operator- cuda fast path verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        b_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] operator- cuda fast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 12: subtraction broadcasting path on gpu
+    // test 12: subtraction broadcasting path on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, std::vector<size_t>{2, 3}, true);
-        auto b = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, true);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        const std::vector<size_t> b_shape = {16, 32};
+        size_t b_elements = 16 * 32;
 
-        auto out = a - b;
+        auto a_raw = generate_4d_data(num_elements, 20.0);
+        auto b_raw = generate_4d_data(b_elements, 2.0);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 9.0));
-        assert(close_enough((*out->data)[2], 27.0));
-        assert(close_enough((*out->data)[3], 39.0));
-        assert(close_enough((*out->data)[5], 57.0));
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, b_shape, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, b_shape, true, Device::CPU);
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
-        b->to(Device::CPU);
+        auto out_cpu = a_cpu - b_cpu;
+        a_cpu->ensure_grad_allocated();
+        b_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        // a receives +1.0 for each element
-        assert(close_enough((*a->grad)[0], 1.0));
-        assert(close_enough((*a->grad)[5], 1.0));
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu - b_gpu;
+        double fwd_time = timer.stop_ms();
 
-        // b is broadcasted across 2 rows, accumulating -1.0 twice = -2.0
-        assert(close_enough((*b->grad)[0], -2.0));
-        assert(close_enough((*b->grad)[1], -2.0));
-        assert(close_enough((*b->grad)[2], -2.0));
-        std::cout << "[PASS] operator- cuda broadcast path verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        b_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+        }
+        for (size_t i = 0; i < b_elements; ++i) {
+            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] operator- cuda broadcast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 13: multiplication matching shape fast path on gpu
+    // test 13: multiplication matching shape fast path on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0, 4.0}, std::vector<size_t>{3}, true);
-        auto b = std::make_shared<Tensor>(std::vector<double>{5.0, 6.0, 7.0}, std::vector<size_t>{3}, true);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        auto a_raw = generate_4d_data(num_elements, 2.0);
+        auto b_raw = generate_4d_data(num_elements, 4.0);
 
-        auto out = a * b;
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 10.0));
-        assert(close_enough((*out->data)[1], 18.0));
-        assert(close_enough((*out->data)[2], 28.0));
+        auto out_cpu = a_cpu * b_cpu;
+        a_cpu->ensure_grad_allocated();
+        b_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
-        b->to(Device::CPU);
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu * b_gpu;
+        double fwd_time = timer.stop_ms();
 
-        // d(a*b)/da = b
-        assert(close_enough((*a->grad)[0], 5.0));
-        assert(close_enough((*a->grad)[1], 6.0));
-        assert(close_enough((*a->grad)[2], 7.0));
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
 
-        // d(a*b)/db = a
-        assert(close_enough((*b->grad)[0], 2.0));
-        assert(close_enough((*b->grad)[1], 3.0));
-        assert(close_enough((*b->grad)[2], 4.0));
-        std::cout << "[PASS] operator* cuda fast path verified\n";
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        b_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] operator* cuda fast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 14: multiplication broadcasting path on gpu
+    // test 14: multiplication broadcasting path on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, std::vector<size_t>{2, 3}, true);
-        auto b = std::make_shared<Tensor>(std::vector<double>{2.0, 3.0, 4.0}, std::vector<size_t>{3}, true);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        const std::vector<size_t> b_shape = {16, 32};
+        size_t b_elements = 16 * 32;
 
-        auto out = a * b;
+        auto a_raw = generate_4d_data(num_elements, 3.0);
+        auto b_raw = generate_4d_data(b_elements, 2.0);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 2.0));   // 1 * 2
-        assert(close_enough((*out->data)[2], 12.0));  // 3 * 4
-        assert(close_enough((*out->data)[3], 8.0));   // 4 * 2
-        assert(close_enough((*out->data)[5], 24.0));  // 6 * 4
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, b_shape, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, b_shape, true, Device::CPU);
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
-        b->to(Device::CPU);
+        auto out_cpu = a_cpu * b_cpu;
+        a_cpu->ensure_grad_allocated();
+        b_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        // a->grad gets b broadcasted: [[2, 3, 4], [2, 3, 4]]
-        assert(close_enough((*a->grad)[0], 2.0));
-        assert(close_enough((*a->grad)[2], 4.0));
-        assert(close_enough((*a->grad)[3], 2.0));
-        assert(close_enough((*a->grad)[5], 4.0));
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu * b_gpu;
+        double fwd_time = timer.stop_ms();
 
-        // b->grad accumulates a across rows: [1+4, 2+5, 3+6] = [5.0, 7.0, 9.0]
-        assert(close_enough((*b->grad)[0], 5.0));
-        assert(close_enough((*b->grad)[1], 7.0));
-        assert(close_enough((*b->grad)[2], 9.0));
-        std::cout << "[PASS] operator* cuda broadcast path verified\n";
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        b_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+        }
+        for (size_t i = 0; i < b_elements; ++i) {
+            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] operator* cuda broadcast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 15: tensor * scalar on gpu
+    // test 15: tensor * scalar on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{2.0, -4.0, 3.0}, std::vector<size_t>{3}, true);
-        a->to(Device::CUDA);
+        auto a_raw = generate_4d_data(num_elements, 2.0);
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
 
-        auto out = a * 2.5;
+        auto out_cpu = a_cpu * 2.5;
+        a_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 5.0));
-        assert(close_enough((*out->data)[1], -10.0));
-        assert(close_enough((*out->data)[2], 7.5));
+        a_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu * 2.5;
+        double fwd_time = timer.stop_ms();
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
 
-        // d(a * 2.5)/da = 2.5
-        assert(close_enough((*a->grad)[0], 2.5));
-        assert(close_enough((*a->grad)[1], 2.5));
-        assert(close_enough((*a->grad)[2], 2.5));
-        std::cout << "[PASS] tensor * scalar cuda pass verified\n";
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] tensor * scalar cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 16: scalar * tensor on gpu
+    // test 16: scalar * tensor on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 4.0}, std::vector<size_t>{2}, true);
-        a->to(Device::CUDA);
+        auto a_raw = generate_4d_data(num_elements, 1.0);
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
 
-        auto out = 3.0 * a;
+        auto out_cpu = 3.0 * a_cpu;
+        a_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 3.0));
-        assert(close_enough((*out->data)[1], 12.0));
+        a_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = 3.0 * a_gpu;
+        double fwd_time = timer.stop_ms();
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
 
-        // d(3.0 * a)/da = 3.0
-        assert(close_enough((*a->grad)[0], 3.0));
-        assert(close_enough((*a->grad)[1], 3.0));
-        std::cout << "[PASS] scalar * tensor cuda pass verified\n";
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] scalar * tensor cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 17: division on gpu
+    // test 17: division on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 12.0}, std::vector<size_t>{2}, true);
-        auto b = std::make_shared<Tensor>(std::vector<double>{2.0, 4.0}, std::vector<size_t>{2}, true);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        auto a_raw = generate_4d_data(num_elements, 20.0);
+        auto b_raw = generate_4d_data(num_elements, 5.0, 0.5); // non-zero divisor
 
-        auto out = a / b;
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, shape_4d, true, Device::CPU);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 5.0));
-        assert(close_enough((*out->data)[1], 3.0));
+        auto out_cpu = a_cpu / b_cpu;
+        a_cpu->ensure_grad_allocated();
+        b_cpu->ensure_grad_allocated();
+        out_cpu->backward();
 
-        out->to(Device::CUDA);
-        out->backward();
-        a->to(Device::CPU);
-        b->to(Device::CPU);
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = a_gpu / b_gpu;
+        double fwd_time = timer.stop_ms();
 
-        // d(a/b)/da = 1 / b -> [0.5, 0.25]
-        assert(close_enough((*a->grad)[0], 0.5));
-        assert(close_enough((*a->grad)[1], 0.25));
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
 
-        // d(a/b)/db = -a / (b^2) -> [-10/4, -12/16] = [-2.5, -0.75]
-        assert(close_enough((*b->grad)[0], -2.5));
-        assert(close_enough((*b->grad)[1], -0.75));
-        std::cout << "[PASS] operator/ cuda pass verified\n";
+        out_gpu->to(Device::CPU);
+        a_gpu->to(Device::CPU);
+        b_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] operator/ cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
-    // test 18: in-place addition (add_) on gpu
+    // test 18: in-place addition (add_) on gpu tensor
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, false);
-        auto b = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0}, std::vector<size_t>{3}, false);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        auto a_raw = generate_4d_data(num_elements, 1.0);
+        auto b_raw = generate_4d_data(num_elements, 10.0);
 
-        a->add_(b);
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, shape_4d, false, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, shape_4d, false, Device::CPU);
 
-        a->to(Device::CPU);
-        assert(close_enough((*a->data)[0], 11.0));
-        assert(close_enough((*a->data)[1], 22.0));
-        assert(close_enough((*a->data)[2], 33.0));
-        std::cout << "[PASS] in-place add_ cuda pass verified\n";
+        a_cpu->add_(b_cpu);
+
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        a_gpu->add_(b_gpu);
+        double fwd_time = timer.stop_ms();
+
+        a_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*a_gpu->data)[i], (*a_cpu->data)[i]));
+        }
+        std::cout << "[PASS] in-place add_ cuda pass verified (exec: " << fwd_time << " ms)\n";
     }
 
-    // test 19: in-place subtraction (sub_) on gpu with broadcasting
+    // test 19: in-place subtraction (sub_) on gpu tensor with broadcasting
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, std::vector<size_t>{2, 3}, false);
-        auto b = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, false);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        const std::vector<size_t> b_shape = {16, 32};
 
-        a->sub_(b);
+        auto a_raw = generate_4d_data(num_elements, 30.0);
+        auto b_raw = generate_4d_data(16 * 32, 2.0);
 
-        a->to(Device::CPU);
-        assert(close_enough((*a->data)[0], 9.0));
-        assert(close_enough((*a->data)[2], 27.0));
-        assert(close_enough((*a->data)[3], 39.0));
-        assert(close_enough((*a->data)[5], 57.0));
-        std::cout << "[PASS] in-place sub_ cuda broadcast pass verified\n";
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
+
+        a_cpu->sub_(b_cpu);
+
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        a_gpu->sub_(b_gpu);
+        double fwd_time = timer.stop_ms();
+
+        a_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*a_gpu->data)[i], (*a_cpu->data)[i]));
+        }
+        std::cout << "[PASS] in-place sub_ cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
 
-    // test 20: operator== on gpu with broadcasting
+    // test 20: operator== on gpu tensor with broadcasting
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0, 6.0}, std::vector<size_t>{2, 3}, false);
-        auto b = std::make_shared<Tensor>(std::vector<double>{1.0, 9.0, 3.0}, std::vector<size_t>{3}, false);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        const std::vector<size_t> b_shape = {16, 32};
 
-        auto out = (*a == *b);
+        auto a_raw = generate_4d_data(num_elements, 5.0);
+        auto b_raw = generate_4d_data(16 * 32, 5.0);
 
-        out->to(Device::CPU);
-        // Row 0: [1==1 (1), 2==9 (0), 3==3 (1)]
-        assert(close_enough((*out->data)[0], 1.0));
-        assert(close_enough((*out->data)[1], 0.0));
-        assert(close_enough((*out->data)[2], 1.0));
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
 
-        // Row 1: [4==1 (0), 5==9 (0), 6==3 (0)]
-        assert(close_enough((*out->data)[3], 0.0));
-        assert(close_enough((*out->data)[4], 0.0));
-        assert(close_enough((*out->data)[5], 0.0));
-        std::cout << "[PASS] operator== cuda broadcast pass verified\n";
+        auto out_cpu = (*a_cpu == *b_cpu);
+
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = (*a_gpu == *b_gpu);
+        double fwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        std::cout << "[PASS] operator== cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
 
-    // test 21: operator< on gpu with broadcasting
+    // test 21: operator< on gpu tensor with broadcasting
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{1.0, 5.0, 2.0}, std::vector<size_t>{3}, false);
-        auto b = std::make_shared<Tensor>(std::vector<double>{3.0, 3.0, 3.0}, std::vector<size_t>{3}, false);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        const std::vector<size_t> b_shape = {16, 32};
 
-        auto out = (*a < *b);
+        auto a_raw = generate_4d_data(num_elements, 1.0);
+        auto b_raw = generate_4d_data(16 * 32, 3.0);
 
-        out->to(Device::CPU);
-        assert(close_enough((*out->data)[0], 1.0)); // 1 < 3 -> 1.0
-        assert(close_enough((*out->data)[1], 0.0)); // 5 < 3 -> 0.0
-        assert(close_enough((*out->data)[2], 1.0)); // 2 < 3 -> 1.0
-        std::cout << "[PASS] operator< cuda pass verified\n";
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
+
+        auto out_cpu = (*a_cpu < *b_cpu);
+
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = (*a_gpu < *b_gpu);
+        double fwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        std::cout << "[PASS] operator< cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
 
-    // test 22: operator> on gpu with broadcasting
+    // test 22: operator> on gpu tensor with broadcasting
     {
-        auto a = std::make_shared<Tensor>(std::vector<double>{10.0, 20.0, 30.0, 40.0, 50.0, 60.0}, std::vector<size_t>{2, 3}, false);
-        auto b = std::make_shared<Tensor>(std::vector<double>{15.0, 20.0, 25.0}, std::vector<size_t>{3}, false);
-        a->to(Device::CUDA);
-        b->to(Device::CUDA);
+        const std::vector<size_t> b_shape = {16, 32};
 
-        auto out = (*a > *b);
+        auto a_raw = generate_4d_data(num_elements, 10.0);
+        auto b_raw = generate_4d_data(16 * 32, 5.0);
 
-        out->to(Device::CPU);
-        // Row 0: [10>15 (0), 20>20 (0), 30>25 (1)]
-        assert(close_enough((*out->data)[0], 0.0));
-        assert(close_enough((*out->data)[1], 0.0));
-        assert(close_enough((*out->data)[2], 1.0));
+        auto a_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_cpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
+        auto a_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto b_gpu = std::make_shared<Tensor>(b_raw, b_shape, false, Device::CPU);
 
-        // Row 1: [40>15 (1), 50>20 (1), 60>25 (1)]
-        assert(close_enough((*out->data)[3], 1.0));
-        assert(close_enough((*out->data)[4], 1.0));
-        assert(close_enough((*out->data)[5], 1.0));
-        std::cout << "[PASS] operator> cuda broadcast pass verified\n";
+        auto out_cpu = (*a_cpu > *b_cpu);
+
+        a_gpu->to(Device::CUDA);
+        b_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = (*a_gpu > *b_gpu);
+        double fwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        std::cout << "[PASS] operator> cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
 
-    std::cout << "[PASS] all gpu tests passed cleanly\n";
+    std::cout << "[PASS] all binary kernels verified\n";
+    std::cout << "------------------------------------------\n";
+
+    std::cout << "starting reduction kernels test...\n";
+
+    // test 23: Tensor sum(dim=2) [Reduce H axis: 16 -> 1]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        auto out_cpu = x_cpu->sum(2, false);
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->sum(2, false);
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] sum(dim=2) [collapsing H] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 24: Tensor sum() [Full Tensor Reduction]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        auto out_cpu = x_cpu->sum();
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->sum();
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(close_enough((*out_gpu->data)[0], (*out_cpu->data)[0]));
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] full sum() [collapsing all dims] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 25: Tensor mean(dim=1) [Reduce C axis: 8 -> 1]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        auto out_cpu = x_cpu->mean(1, false);
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->mean(1, false);
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] mean(dim=1) [collapsing C] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 26: Tensor max(dim=3) [Reduce W axis: 32 -> 1]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        auto out_cpu = x_cpu->max(3, false);
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->max(3, false);
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] max(dim=3) [collapsing W] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 27: Tensor min(dim=0) [Reduce B axis: 4 -> 1]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        auto out_cpu = x_cpu->min(0, false);
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->min(0, false);
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] min(dim=0) [collapsing B] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 28: Tensor argmax(dim=3) [Index along W axis]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+
+        auto out_cpu = x_cpu->argmax(3, false);
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->argmax(3, false);
+        double fwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        std::cout << "[PASS] argmax(dim=3) [index along W] verified (fwd: " << fwd_time << " ms)\n";
+    }
+
+    // test 29: Tensor argmin(dim=2) [Index along H axis]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+
+        auto out_cpu = x_cpu->argmin(2, false);
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->argmin(2, false);
+        double fwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        std::cout << "[PASS] argmin(dim=2) [index along H] verified (fwd: " << fwd_time << " ms)\n";
+    }
+
+    std::cout << "==========================================\n";
+    std::cout << "[PASS] all 29 GPU tests and latency benchmarks verified cleanly!\n";
+    std::cout << "==========================================\n";
+
     return 0;
 }

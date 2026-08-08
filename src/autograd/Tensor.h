@@ -17,6 +17,16 @@ enum class Device{
 };
 
 class Tensor : public std::enable_shared_from_this<Tensor> {
+public:
+    // store calculated variables for dimensional reductions
+    struct ReductionMeta {
+        std::vector<size_t> out_shape;
+        size_t total_out_elements;
+        size_t reduced_size;
+        size_t inner_block_size;
+        size_t outer_block_size;
+    };
+    
 private:
     // computes broadcasted shapes and sets strides to 0 along stretched dimensions
     static void compute_broadcast_metadata(
@@ -31,16 +41,6 @@ private:
         const std::vector<size_t>& current_coords,
         const std::vector<size_t>& broadcast_strides
     );
-
-    
-    // store calculated variables for dimensional reductions
-    struct ReductionMeta {
-        std::vector<size_t> out_shape;
-        size_t total_out_elements;
-        size_t reduced_size;
-        size_t inner_block_size;
-        size_t outer_block_size;
-    };
     
     // helper function to calculate all the boilerplate metadata
     ReductionMeta prepare_reduction_metadata(size_t dim, bool keepdim) const;

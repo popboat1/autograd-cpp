@@ -696,6 +696,184 @@ __global__ void binary_backward_broadcast(
 // ---------------------------------
 
 
+// ---------------------------------
+// reduction functions kernels
+// ---------------------------------
+
+// --- sum
+struct sumForwardOp{
+    __device__ inline double operator()(double a, double b) const {
+        return a + b;
+    }
+    static constexpr double identity = 0.0;
+};
+
+// functor for sum derivative
+struct sumBackwardOp {
+    __device__ inline double operator()(size_t in_idx, size_t out_idx) const {
+        return 1.0;
+    }
+};
+
+// functor for mean derivative
+struct meanBackwardOp {
+    double scale;
+    meanBackwardOp(size_t reducedSize) : scale(1.0 / static_cast<double>(reducedSize)) {}
+
+    __device__ inline double operator()(size_t in_idx, size_t out_idx) const {
+        return scale;
+    }
+};
+
+// --- max
+struct maxReduceOp {
+    __device__ inline double operator()(double a, double b) const {
+        return fmax(a, b);
+    }
+    static constexpr double identity = -INFINITY;
+};
+
+// functor for max derivative: 1.0 if input matches max output, else 0.0
+struct maxBackwardOp {
+    const double* input;
+    const double* output;
+    maxBackwardOp(const double* in_ptr, const double* out_ptr)
+        : input(in_ptr), output(out_ptr) {}
+
+    __device__ inline double operator()(size_t in_idx, size_t out_idx) const {
+        return (input[in_idx] == output[out_idx]) ? 1.0 : 0.0;
+    }
+};
+
+// --- min
+struct minReduceOp {
+    __device__ inline double operator()(double a, double b) const {
+        return fmin(a, b); 
+    }
+    static constexpr double identity = INFINITY;
+};
+
+// functor for min derivative: 1.0 if input matches min output, else 0.0
+struct minBackwardOp {
+    const double* input;
+    const double* output;
+    minBackwardOp(const double* in_ptr, const double* out_ptr)
+        : input(in_ptr), output(out_ptr) {}
+
+    __device__ inline double operator()(size_t in_idx, size_t out_idx) const {
+        return (input[in_idx] == output[out_idx]) ? 1.0 : 0.0;
+    }
+};
+
+// --- argmax
+struct argmaxCompareOp{
+    __device__ inline bool operator()(double val, double best_val) const {
+        return val > best_val;
+    }
+};
+
+// --- argmin
+struct argminCompareOp{
+    __device__ inline bool operator()(double val, double best_val) const {
+        return val < best_val;
+    }
+};
+
+
+// --- template for forward pass
+template <typename Op>
+__global__ void reduction_forward(
+    const double* __restrict__ input,
+    double* __restrict__ output,
+    size_t outer_size,
+    size_t reduced_size,
+    size_t inner_size,
+    size_t total_elements,
+    Op op
+) {
+    size_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= total_elements) return;
+
+    // decompose out_idx into outer and inner coords
+    size_t inner = out_idx % inner_size;
+    size_t outer = out_idx / inner_size;
+
+    // compute starting mem address in input tensor
+    size_t base_in_idx = outer * (reduced_size * inner_size) + inner;
+
+    // iinit with op's identity val
+    double acc = Op::identity;
+
+    // reduce along R dim
+    for(size_t r = 0; r < reduced_size; ++r){
+        acc = op(acc, input[base_in_idx + r * inner_size]);
+    }
+
+    output[out_idx] = acc;
+}
+
+// --- template for backward pass
+template <typename Op>
+__global__ void reduction_backward(
+    const double* __restrict__ upstream_grad,
+    double* __restrict__ self_grad,
+    size_t reduced_size,
+    size_t inner_size,
+    size_t total_input_elements,
+    Op op
+) {
+    size_t in_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (in_idx >= total_input_elements) return;
+
+    // map global input index back to corresponding output index
+    size_t inner = in_idx % inner_size;
+    size_t outer = in_idx / (reduced_size * inner_size);
+    size_t out_idx = outer * inner_size + inner;
+
+    // local derivative multiplier from functor
+    double local_grad = op(in_idx, out_idx);
+
+    self_grad[in_idx] += upstream_grad[out_idx] * local_grad;
+}
+
+// argmax/argmin template
+template <typename IsBetterOp>
+__global__ void arg_reduction_forward(
+    const double* __restrict__ input,
+    double* __restrict__ output,
+    size_t outer_size,
+    size_t reduced_size,
+    size_t inner_size,
+    size_t total_elements,
+    double init_val,
+    IsBetterOp is_better
+) {
+    size_t out_idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (out_idx >= total_elements) return;
+
+    size_t inner = out_idx % inner_size;
+    size_t outer = out_idx / inner_size;
+
+    size_t base_in_idx = outer * (reduced_size * inner_size) + inner;
+
+    double best_val = init_val;
+    size_t best_r = 0;
+
+    for(size_t r = 0; r < reduced_size; ++r){
+        double val = input[base_in_idx + r * inner_size];
+        if(is_better(val, best_val)){
+            best_val = val;
+            best_r = r;
+        }
+    }
+
+    output[out_idx] = static_cast<double>(best_r);
+}
+
+// end of reduction kernels...
+// ---------------------------------
+
+
 // --------------
 // some CUDA configs
 
@@ -790,6 +968,71 @@ inline void launch_binary_backward_broadcast(
 ) {
     int blocks = cuda_utils::ceil_div(total_elements, threads);
     binary_backward_broadcast<<<blocks, threads>>>(target_grad, upstream_grad, lhs, rhs, total_elements, meta, is_lhs, local_grad_op);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+
+// ---------------------------------------
+// reduction kernels launcher
+template <typename Op>
+inline void launch_reduction_forward(
+    const double* input,
+    double* output,
+    const Tensor::ReductionMeta& meta,
+    Op op
+) {
+    int blocks = cuda_utils::ceil_div(meta.total_out_elements, threads);
+    reduction_forward<<<blocks, threads>>>(
+        input, output,
+        meta.outer_block_size,
+        meta.reduced_size,
+        meta.inner_block_size,
+        meta.total_out_elements,
+        op
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <typename Op>
+inline void launch_reduction_backward(
+    const double* upstream_grad,
+    double* self_grad,
+    size_t reduced_size,
+    size_t inner_size,
+    size_t total_input_elements,
+    Op op
+) {
+    int blocks = cuda_utils::ceil_div(total_input_elements, threads);
+    reduction_backward<<<blocks, threads>>>(
+        upstream_grad,
+        self_grad,
+        reduced_size,
+        inner_size,
+        total_input_elements,
+        op
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// launcher for argmax/argmin kernel
+template <typename IsBetterOp>
+inline void launch_arg_reduction_forward(
+    const double* input,
+    double* output,
+    const Tensor::ReductionMeta& meta,
+    double init_val,
+    IsBetterOp is_better
+) {
+    int blocks = cuda_utils::ceil_div(meta.total_out_elements, threads);
+    arg_reduction_forward<<<blocks, threads>>>(
+        input, output,
+        meta.outer_block_size,
+        meta.reduced_size,
+        meta.inner_block_size,
+        meta.total_out_elements,
+        init_val,
+        is_better
+    );
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -1954,116 +2197,6 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
 
 
 
-//sum function
-TensorPtr Tensor::sum() {
-    // if non-contiguous, force contiguity to prevent physical memory misalignment
-    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
-
-    std::vector<double> out_values(1, 0.0);
-    for (double val : (*active_this->data)) {
-        out_values[0] += val;
-    }
-
-    auto out = std::make_shared<Tensor>(out_values, std::vector<size_t>{1}, std::vector<TensorPtr>{active_this}, "sum");
-
-    std::weak_ptr<Tensor> weak_out = out;
-
-    out->backward_func = [active_this, weak_out]() {
-        if (auto out_ptr = weak_out.lock()) {
-            double upstream_grad = (*out_ptr->grad)[0];
-            // Safe lazy gradient allocation loop guard
-            if (active_this->requires_grad) {
-                for (size_t i = 0; i < active_this->data->size(); ++i) {
-                    (*active_this->grad)[i] += upstream_grad;
-                }
-            }
-        }
-    };
-
-    return out;
-}
-
-// sum function with dimensions
-TensorPtr Tensor::sum(size_t dim, bool keepdim){
-    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
-
-    std::vector<double> out_vals(meta.total_out_elements, 0.0);
-
-    // forward pass
-    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
-        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
-            size_t out_flat = outer * meta.inner_block_size + inner;
-
-            double sum = 0.0;
-
-            for(size_t r {0}; r < meta.reduced_size; ++r){
-                std::vector<size_t> coords(shape.size());
-                coords[dim] = r;
-
-                size_t temp_inner = inner;
-                for (size_t d = shape.size() - 1; d > dim; --d) {
-                    coords[d] = temp_inner % shape[d];
-                    temp_inner /= shape[d];
-                }
-                size_t temp_outer = outer;
-                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                    coords[d] = temp_outer % shape[d];
-                    temp_outer /= shape[d];
-                }
-
-                size_t self_flat = get_flat_index(coords);
-                sum += (*data)[self_flat];
-            }
-
-            out_vals[out_flat] = sum;
-        }
-    }
-
-    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{shared_from_this()}, "sum");
-
-    // backward pass
-    std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
-
-    size_t outer_bs = meta.outer_block_size;
-    size_t inner_bs = meta.inner_block_size;
-    size_t r_size = meta.reduced_size;
-
-    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size, dim](){
-        if(auto out_ptr = weak_out.lock()){
-
-            for (size_t outer {0}; outer < outer_bs; ++outer) {
-                for (size_t inner {0}; inner < inner_bs; ++inner) {
-                    size_t out_flat = outer * inner_bs + inner;
-                    double upstream_grad = (*out_ptr->grad)[out_flat];
-
-                    if(self->requires_grad){
-                        for (size_t r {0}; r < r_size; ++r) {
-                            std::vector<size_t> back_coords(self->shape.size());
-                            back_coords[dim] = r;
-                            
-                            size_t temp_inner = inner;
-                            for (size_t d = self->shape.size() - 1; d > dim; --d) {
-                                back_coords[d] = temp_inner % self->shape[d];
-                                temp_inner /= self->shape[d];
-                            }
-                            size_t temp_outer = outer;
-                            for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                                back_coords[d] = temp_outer % self->shape[d];
-                                temp_outer /= self->shape[d];
-                            }
-
-                            size_t self_flat = self->get_flat_index(back_coords);
-                            (*self->grad)[self_flat] += upstream_grad;
-                        }
-                    }
-                }
-            }
-        }
-    };
-
-    return out;
-}
 
 TensorPtr Tensor::transpose(size_t dim0, size_t dim1) {
     if (dim0 >= shape.size() || dim1 >= shape.size()) {
@@ -2641,9 +2774,15 @@ TensorPtr operator-(const TensorPtr& tensor) {
     return tensor->neg();
 }
 
+
+
+// end of binary ops...
+// -------------------------------------------
+
+
 // ------------------------------------------
-
-
+// advanced activations...
+// ------------------------------------------
 
 // softmax
 TensorPtr Tensor::softmax(size_t dim) {
@@ -2674,86 +2813,240 @@ TensorPtr Tensor::log_softmax(size_t dim) {
     return shifted - sum_exps->log();
 }
 
-// tensor->mean() function
-TensorPtr Tensor::mean(size_t dim, bool keepdim){
-    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
-    
-    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+// end of unary/activations functions....
+// -------------------------------------------
+
+
+// -------------------------------------------
+// REDUCTION FUNCTIONS
+// -------------------------------------------
+
+
+// sum function with dimensions
+TensorPtr Tensor::sum(size_t dim, bool keepdim){
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
+    ReductionMeta meta = active_this->prepare_reduction_metadata(dim, keepdim);
+
+    std::vector<double> dummy_vals(meta.total_out_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), meta.out_shape, std::vector<TensorPtr>{active_this}, "sum");
+    out->to(active_this->device);
 
     // forward pass
-    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
-        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
-            size_t out_flat = outer * meta.inner_block_size + inner;
-            
-            double sum = 0.0;
-
-            for(size_t r {0}; r < meta.reduced_size; ++r){
-                std::vector<size_t> coords(shape.size());
-                coords[dim] = r;
-
-                size_t temp_inner = inner;
-                for (size_t d = shape.size() - 1; d > dim; --d) {
-                    coords[d] = temp_inner % shape[d];
-                    temp_inner /= shape[d];
+    if(active_this->device == Device::CUDA){
+        launch_reduction_forward(
+            active_this->cuda_data,
+            out->cuda_data,
+            meta,
+            sumForwardOp()
+        );
+    }else {
+        double* out_ptr = out->data->data();
+        // cpu forward pass
+        for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+            for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+                size_t out_flat = outer * meta.inner_block_size + inner;
+    
+                double sum = 0.0;
+    
+                for(size_t r {0}; r < meta.reduced_size; ++r){
+                    std::vector<size_t> coords(shape.size());
+                    coords[dim] = r;
+    
+                    size_t temp_inner = inner;
+                    for (size_t d = shape.size() - 1; d > dim; --d) {
+                        coords[d] = temp_inner % shape[d];
+                        temp_inner /= shape[d];
+                    }
+                    size_t temp_outer = outer;
+                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                        coords[d] = temp_outer % shape[d];
+                        temp_outer /= shape[d];
+                    }
+    
+                    size_t self_flat = get_flat_index(coords);
+                    sum += (*data)[self_flat];
                 }
-                size_t temp_outer = outer;
-                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                    coords[d] = temp_outer % shape[d];
-                    temp_outer /= shape[d];
-                }
-
-                size_t self_flat = get_flat_index(coords);
-                sum += (*data)[self_flat];
+    
+                out_ptr[out_flat] = sum;
             }
-
-            out_vals[out_flat] = sum / meta.reduced_size;
         }
-    }
 
-    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{shared_from_this()}, "mean");
+    }
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
+    auto self = active_this;
+    size_t total_in = active_this->data->size();
 
-    size_t outer_bs = meta.outer_block_size;
-    size_t inner_bs = meta.inner_block_size;
-    size_t r_size = meta.reduced_size;
-
-    out->backward_func = [self, weak_out, outer_bs, inner_bs, r_size, dim](){
+    out->backward_func = [self, weak_out, meta, total_in, dim](){
         if(auto out_ptr = weak_out.lock()){
-            // derivative of a mean is just 1/N
-            double grad_scale = 1.0 / static_cast<double>(r_size);
+            if(self->requires_grad){
 
-            for (size_t outer {0}; outer < outer_bs; ++outer) {
-                for (size_t inner {0}; inner < inner_bs; ++inner) {
-                    size_t out_flat = outer * inner_bs + inner;
-                    
-                    // grab the upstream gradient for this specific block
-                    double upstream_grad = (*out_ptr->grad)[out_flat] * grad_scale;
+                if(self->device == Device::CUDA){
+                    launch_reduction_backward(
+                        out_ptr->cuda_grad,
+                        self->cuda_grad,
+                        meta.reduced_size,
+                        meta.inner_block_size,
+                        total_in,
+                        sumBackwardOp()
+                    );
+                } else {
+                    for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
+                        for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
+                            size_t out_flat = outer * meta.inner_block_size + inner;
+                            double upstream_grad = (*out_ptr->grad)[out_flat];
+        
+                            if(self->requires_grad){
+                                for (size_t r {0}; r < meta.reduced_size; ++r) {
+                                    std::vector<size_t> back_coords(self->shape.size());
+                                    back_coords[dim] = r;
+                                    
+                                    size_t temp_inner = inner;
+                                    for (size_t d = self->shape.size() - 1; d > dim; --d) {
+                                        back_coords[d] = temp_inner % self->shape[d];
+                                        temp_inner /= self->shape[d];
+                                    }
+                                    size_t temp_outer = outer;
+                                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                                        back_coords[d] = temp_outer % self->shape[d];
+                                        temp_outer /= self->shape[d];
+                                    }
+        
+                                    size_t self_flat = self->get_flat_index(back_coords);
+                                    (*self->grad)[self_flat] += upstream_grad;
+                                }
+                            }
+                        }
+                    }
 
-                    // distribute it equally to all elements that formed the mean
-                    if(self->requires_grad){
-                        for (size_t r {0}; r < r_size; ++r) {
-                            std::vector<size_t> back_coords(self->shape.size());
-                            back_coords[dim] = r;
+                }
+            }
+
+        }
+    };
+
+    return out;
+}
+
+//sum function
+TensorPtr Tensor::sum() {
+    return this->reshape({this->data->size()})->sum(0, false);
+}
+
+// tensor->mean() function
+TensorPtr Tensor::mean(size_t dim, bool keepdim){
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
+    ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
+    
+    std::vector<double> dummy_vals(meta.total_out_elements);
+    auto out = std::make_shared<Tensor>(std::move(dummy_vals), meta.out_shape, std::vector<TensorPtr>{active_this}, "mean");
+    out->to(active_this->device);
+
+    // --- forward pass
+    if(active_this->device == Device::CUDA){
+        // reduce sum along target dim
+        launch_reduction_forward(
+            active_this->cuda_data,
+            out->cuda_data,
+            meta,
+            sumForwardOp()
+        );
+        // divide by reduced_size
+        launch_unary_forward(
+            out->cuda_data,
+            out->cuda_data,
+            meta.total_out_elements,
+            mulScalarForwardOp(1.0 / static_cast<double>(meta.reduced_size))
+        );
+    } else {
+        // --- cpu forward pass
+        double* out_ptr = out->data->data();
+        for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+            for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+                size_t out_flat = outer * meta.inner_block_size + inner;
+                
+                double sum = 0.0;
+    
+                for(size_t r {0}; r < meta.reduced_size; ++r){
+                    std::vector<size_t> coords(shape.size());
+                    coords[dim] = r;
+    
+                    size_t temp_inner = inner;
+                    for (size_t d = shape.size() - 1; d > dim; --d) {
+                        coords[d] = temp_inner % shape[d];
+                        temp_inner /= shape[d];
+                    }
+                    size_t temp_outer = outer;
+                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                        coords[d] = temp_outer % shape[d];
+                        temp_outer /= shape[d];
+                    }
+    
+                    size_t self_flat = get_flat_index(coords);
+                    sum += (*data)[self_flat];
+                }
+    
+                out_ptr[out_flat] = sum / meta.reduced_size;
+            }
+    }
+    }
+
+    // backward pass
+    std::weak_ptr<Tensor> weak_out = out;
+    auto self = active_this;
+    size_t total_in = active_this->data->size();
+
+    out->backward_func = [self, weak_out, meta, total_in, dim](){
+        if(auto out_ptr = weak_out.lock()){
+            if (self->requires_grad) {
+
+                if (self->device == Device::CUDA) {
+                    launch_reduction_backward(
+                        out_ptr->cuda_grad,
+                        self->cuda_grad,
+                        meta.reduced_size,
+                        meta.inner_block_size,
+                        total_in,
+                        meanBackwardOp(meta.reduced_size)
+                    );
+                } else {
+                    // derivative of a mean is just 1/N
+                    double grad_scale = 1.0 / static_cast<double>(meta.reduced_size);
+        
+                    for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
+                        for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
+                            size_t out_flat = outer * meta.inner_block_size + inner;
                             
-                            size_t temp_inner = inner;
-                            for (size_t d = self->shape.size() - 1; d > dim; --d) {
-                                back_coords[d] = temp_inner % self->shape[d];
-                                temp_inner /= self->shape[d];
+                            // grab the upstream gradient for this specific block
+                            double upstream_grad = (*out_ptr->grad)[out_flat] * grad_scale;
+        
+                            // distribute it equally to all elements that formed the mean
+                            if(self->requires_grad){
+                                for (size_t r {0}; r < meta.reduced_size; ++r) {
+                                    std::vector<size_t> back_coords(self->shape.size());
+                                    back_coords[dim] = r;
+                                    
+                                    size_t temp_inner = inner;
+                                    for (size_t d = self->shape.size() - 1; d > dim; --d) {
+                                        back_coords[d] = temp_inner % self->shape[d];
+                                        temp_inner /= self->shape[d];
+                                    }
+                                    size_t temp_outer = outer;
+                                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                                        back_coords[d] = temp_outer % self->shape[d];
+                                        temp_outer /= self->shape[d];
+                                    }
+        
+                                    size_t self_flat = self->get_flat_index(back_coords);
+                                    (*self->grad)[self_flat] += upstream_grad;
+                                }
                             }
-                            size_t temp_outer = outer;
-                            for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                                back_coords[d] = temp_outer % self->shape[d];
-                                temp_outer /= self->shape[d];
-                            }
-
-                            size_t self_flat = self->get_flat_index(back_coords);
-                            (*self->grad)[self_flat] += upstream_grad;
                         }
                     }
                 }
+
             }
         }
     };
@@ -2763,59 +3056,87 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
 
 // tensor->max() function
 TensorPtr Tensor::max(size_t dim, bool keepdim){
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
-    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+
+    std::vector<double> out_vals(meta.total_out_elements);
     auto max_indices = std::make_shared<std::vector<size_t>>(meta.total_out_elements, 0); // required for backward pass
 
-    // forward pass
-    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
-        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
-            size_t out_flat = outer * meta.inner_block_size + inner;
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{active_this}, "max");
+    out->to(active_this->device);
 
-            double current_max = -INFINITY;
-            size_t best_flat_idx = 0;
-
-            for(size_t r {0}; r < meta.reduced_size; ++r){
-                std::vector<size_t> coords(shape.size());
-                coords[dim] = r;
-                
-                size_t temp_inner = inner;
-                for (size_t d = shape.size() - 1; d > dim; --d) {
-                    coords[d] = temp_inner % shape[d];
-                    temp_inner /= shape[d];
+    // --- forward pass
+    if(active_this->device == Device::CUDA){
+        launch_reduction_forward(
+            active_this->cuda_data,
+            out->cuda_data,
+            meta,
+            maxReduceOp()
+        );
+    } else {
+        // --- cpu
+        for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+            for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+                size_t out_flat = outer * meta.inner_block_size + inner;
+    
+                double current_max = -INFINITY;
+                size_t best_flat_idx = 0;
+    
+                for(size_t r {0}; r < meta.reduced_size; ++r){
+                    std::vector<size_t> coords(shape.size());
+                    coords[dim] = r;
+                    
+                    size_t temp_inner = inner;
+                    for (size_t d = shape.size() - 1; d > dim; --d) {
+                        coords[d] = temp_inner % shape[d];
+                        temp_inner /= shape[d];
+                    }
+                    size_t temp_outer = outer;
+                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                        coords[d] = temp_outer % shape[d];
+                        temp_outer /= shape[d];
+                    }
+    
+                    size_t self_flat = get_flat_index(coords);
+                    if ((*data)[self_flat] > current_max) {
+                        current_max = (*data)[self_flat];
+                        best_flat_idx = self_flat;
+                    }
                 }
-                size_t temp_outer = outer;
-                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                    coords[d] = temp_outer % shape[d];
-                    temp_outer /= shape[d];
-                }
-
-                size_t self_flat = get_flat_index(coords);
-                if ((*data)[self_flat] > current_max) {
-                    current_max = (*data)[self_flat];
-                    best_flat_idx = self_flat;
-                }
+                out_vals[out_flat] = current_max;
+                (*max_indices)[out_flat] = best_flat_idx;
             }
-            out_vals[out_flat] = current_max;
-            (*max_indices)[out_flat] = best_flat_idx;
         }
     }
 
-    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{shared_from_this()}, "max");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
+    auto self = active_this;
+    size_t total_in = active_this->data->size();
     size_t total_out_elements = meta.total_out_elements;
 
-    out->backward_func = [self, weak_out, max_indices, total_out_elements]() {
+    out->backward_func = [self, weak_out, max_indices, meta, total_in, total_out_elements]() {
         if(auto out_ptr = weak_out.lock()){
             // gradient routing bypasses block math entirely; just map flat index to flat index
             if(self->requires_grad){
-                for (size_t i {0}; i < total_out_elements; ++i) {
-                    size_t winner_flat_idx = (*max_indices)[i];
-                    (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+                
+                if(self->device == Device::CUDA){
+                    launch_reduction_backward(
+                        out_ptr->cuda_grad,
+                        self->cuda_grad,
+                        meta.reduced_size,
+                        meta.inner_block_size,
+                        total_in,
+                        maxBackwardOp(self->cuda_data, out_ptr->cuda_data)
+                    );
+                } else {
+                    for (size_t i {0}; i < total_out_elements; ++i) {
+                        size_t winner_flat_idx = (*max_indices)[i];
+                        (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+                    }
                 }
+
             }
         }
     };
@@ -2825,61 +3146,86 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
 
 // tensor->min() function
 TensorPtr Tensor::min(size_t dim, bool keepdim){
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
 
-    std::vector<double> out_vals(meta.total_out_elements, 0.0);
-
+    std::vector<double> out_vals(meta.total_out_elements);
     auto min_indices = std::make_shared<std::vector<size_t>>(meta.total_out_elements, 0); // required for backward pass
 
+    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{active_this}, "min");
+    out->to(active_this->device);
+
     // forward pass
-    for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
-        for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
-            size_t out_flat = outer * meta.inner_block_size + inner;
-
-            double current_min = INFINITY;
-            size_t best_flat_idx = 0;
-
-            for(size_t r {0}; r < meta.reduced_size; ++r){
-                std::vector<size_t> coords(shape.size());
-                coords[dim] = r;
-                
-                size_t temp_inner = inner;
-                for (size_t d = shape.size() - 1; d > dim; --d) {
-                    coords[d] = temp_inner % shape[d];
-                    temp_inner /= shape[d];
+    if(active_this->device == Device::CUDA){
+        launch_reduction_forward(
+            active_this->cuda_data,
+            out->cuda_data,
+            meta,
+            minReduceOp()
+        );
+    } else {
+        for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
+            for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
+                size_t out_flat = outer * meta.inner_block_size + inner;
+    
+                double current_min = INFINITY;
+                size_t best_flat_idx = 0;
+    
+                for(size_t r {0}; r < meta.reduced_size; ++r){
+                    std::vector<size_t> coords(shape.size());
+                    coords[dim] = r;
+                    
+                    size_t temp_inner = inner;
+                    for (size_t d = shape.size() - 1; d > dim; --d) {
+                        coords[d] = temp_inner % shape[d];
+                        temp_inner /= shape[d];
+                    }
+                    size_t temp_outer = outer;
+                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                        coords[d] = temp_outer % shape[d];
+                        temp_outer /= shape[d];
+                    }
+    
+                    size_t self_flat = get_flat_index(coords);
+                    if ((*data)[self_flat] < current_min) {
+                        current_min = (*data)[self_flat];
+                        best_flat_idx = self_flat;
+                    }
                 }
-                size_t temp_outer = outer;
-                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                    coords[d] = temp_outer % shape[d];
-                    temp_outer /= shape[d];
-                }
-
-                size_t self_flat = get_flat_index(coords);
-                if ((*data)[self_flat] < current_min) {
-                    current_min = (*data)[self_flat];
-                    best_flat_idx = self_flat;
-                }
+                out_vals[out_flat] = current_min;
+                (*min_indices)[out_flat] = best_flat_idx;
             }
-            out_vals[out_flat] = current_min;
-            (*min_indices)[out_flat] = best_flat_idx;
         }
     }
 
-    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{shared_from_this()}, "min");
 
     // backward pass
     std::weak_ptr<Tensor> weak_out = out;
-    auto self = shared_from_this();
+    auto self = active_this;
+    size_t total_in = active_this->data->size();
     size_t total_out_elements = meta.total_out_elements;
 
-    out->backward_func = [self, weak_out, min_indices, total_out_elements]() {
+    out->backward_func = [self, weak_out, min_indices, meta, total_in, total_out_elements]() {
         if(auto out_ptr = weak_out.lock()){
             // gradient routing bypasses block math entirely; just map flat index to flat index
             if(self->requires_grad){
-                for (size_t i {0}; i < total_out_elements; ++i) {
-                    size_t winner_flat_idx = (*min_indices)[i];
-                    (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+
+                if(self->device == Device::CUDA){
+                    launch_reduction_backward(
+                        out_ptr->cuda_grad,
+                        self->cuda_grad,
+                        meta.reduced_size,
+                        meta.inner_block_size,
+                        total_in,
+                        minBackwardOp(self->cuda_data, out_ptr->cuda_data)
+                    );
+                } else {
+                    for (size_t i {0}; i < total_out_elements; ++i) {
+                        size_t winner_flat_idx = (*min_indices)[i];
+                        (*self->grad)[winner_flat_idx] += (*out_ptr->grad)[i];
+                    }
                 }
+                
             }
         }
     };
@@ -2889,92 +3235,116 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
 
 // tensor->argmax() function
 TensorPtr Tensor::argmax(size_t dim, bool keepdim) {
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
-    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+    
+    std::vector<double> out_vals(meta.total_out_elements);
+    auto out = std::make_shared<Tensor>(std::move(out_vals), meta.out_shape, std::vector<TensorPtr>{active_this}, "argmax");
+    out->to(active_this->device);
 
-    // forward pass
-    for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
-        for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
-            size_t out_flat = outer * meta.inner_block_size + inner;
-            double current_max = -INFINITY;
-            size_t best_r = 0; // Track the relative index 'r'
-
-            for (size_t r {0}; r < meta.reduced_size; ++r) {
-                std::vector<size_t> coords(shape.size());
-                coords[dim] = r;
-                
-                size_t temp_inner = inner;
-                for (size_t d = shape.size() - 1; d > dim; --d) {
-                    coords[d] = temp_inner % shape[d];
-                    temp_inner /= shape[d];
+    
+    // --- forward pass
+    if(active_this->device == Device::CUDA){
+        launch_arg_reduction_forward(
+            active_this->cuda_data,
+            out->cuda_data,
+            meta,
+            -INFINITY,
+            argmaxCompareOp()
+        );
+    } else {
+        double* out_ptr = out->data->data();
+        for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
+            for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
+                size_t out_flat = outer * meta.inner_block_size + inner;
+                double current_max = -INFINITY;
+                size_t best_r = 0; // track the relative index 'r'
+    
+                for (size_t r {0}; r < meta.reduced_size; ++r) {
+                    std::vector<size_t> coords(shape.size());
+                    coords[dim] = r;
+                    
+                    size_t temp_inner = inner;
+                    for (size_t d = shape.size() - 1; d > dim; --d) {
+                        coords[d] = temp_inner % shape[d];
+                        temp_inner /= shape[d];
+                    }
+                    size_t temp_outer = outer;
+                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                        coords[d] = temp_outer % shape[d];
+                        temp_outer /= shape[d];
+                    }
+    
+                    size_t self_flat = get_flat_index(coords);
+                    if ((*data)[self_flat] > current_max) {
+                        current_max = (*data)[self_flat];
+                        best_r = r;
+                    }
                 }
-                size_t temp_outer = outer;
-                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                    coords[d] = temp_outer % shape[d];
-                    temp_outer /= shape[d];
-                }
-
-                size_t self_flat = get_flat_index(coords);
-                if ((*data)[self_flat] > current_max) {
-                    current_max = (*data)[self_flat];
-                    best_r = r;
-                }
+                // output the index (cast to double), not the value
+                out_ptr[out_flat] = static_cast<double>(best_r);
             }
-            // Output the index (cast to double), not the value
-            out_vals[out_flat] = static_cast<double>(best_r);
         }
     }
 
-    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{}, "argmax");
-    
     out->requires_grad = false;
-    
     return out;
 }
 
 // tensor->argmin() function
 TensorPtr Tensor::argmin(size_t dim, bool keepdim) {
+    auto active_this = is_contiguous() ? shared_from_this() : contiguous();
     ReductionMeta meta = prepare_reduction_metadata(dim, keepdim);
 
-    std::vector<double> out_vals(meta.total_out_elements, 0.0);
+    std::vector<double> out_vals(meta.total_out_elements);
+    auto out = std::make_shared<Tensor>(std::move(out_vals), meta.out_shape, std::vector<TensorPtr>{}, "argmin");
+    out->to(active_this->device);
 
     // forward pass
-    for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
-        for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
-            size_t out_flat = outer * meta.inner_block_size + inner;
-            double current_min = INFINITY;
-            size_t best_r = 0; // Track the relative index 'r'
-
-            for (size_t r {0}; r < meta.reduced_size; ++r) {
-                std::vector<size_t> coords(shape.size());
-                coords[dim] = r;
-                
-                size_t temp_inner = inner;
-                for (size_t d = shape.size() - 1; d > dim; --d) {
-                    coords[d] = temp_inner % shape[d];
-                    temp_inner /= shape[d];
+    if(active_this->device == Device::CUDA){
+        launch_arg_reduction_forward(
+            active_this->cuda_data,
+            out->cuda_data,
+            meta,
+            INFINITY,
+            argminCompareOp()
+        );
+    } else {
+        double* out_ptr = out->data->data();
+        for (size_t outer {0}; outer < meta.outer_block_size; ++outer) {
+            for (size_t inner {0}; inner < meta.inner_block_size; ++inner) {
+                size_t out_flat = outer * meta.inner_block_size + inner;
+                double current_min = INFINITY;
+                size_t best_r = 0; // Track the relative index 'r'
+    
+                for (size_t r {0}; r < meta.reduced_size; ++r) {
+                    std::vector<size_t> coords(shape.size());
+                    coords[dim] = r;
+                    
+                    size_t temp_inner = inner;
+                    for (size_t d = shape.size() - 1; d > dim; --d) {
+                        coords[d] = temp_inner % shape[d];
+                        temp_inner /= shape[d];
+                    }
+                    size_t temp_outer = outer;
+                    for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
+                        coords[d] = temp_outer % shape[d];
+                        temp_outer /= shape[d];
+                    }
+    
+                    size_t self_flat = get_flat_index(coords);
+                    if ((*data)[self_flat] < current_min) {
+                        current_min = (*data)[self_flat];
+                        best_r = r;
+                    }
                 }
-                size_t temp_outer = outer;
-                for (int d = static_cast<int>(dim) - 1; d >= 0; --d) {
-                    coords[d] = temp_outer % shape[d];
-                    temp_outer /= shape[d];
-                }
-
-                size_t self_flat = get_flat_index(coords);
-                if ((*data)[self_flat] < current_min) {
-                    current_min = (*data)[self_flat];
-                    best_r = r;
-                }
+                // Output the index (cast to double), not the value
+                out_ptr[out_flat] = static_cast<double>(best_r);
             }
-            // Output the index (cast to double), not the value
-            out_vals[out_flat] = static_cast<double>(best_r);
         }
     }
 
-    auto out = std::make_shared<Tensor>(out_vals, meta.out_shape, std::vector<TensorPtr>{}, "argmin");
-    
     out->requires_grad = false;
-    
     return out;
 }
 
