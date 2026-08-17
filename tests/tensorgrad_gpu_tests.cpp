@@ -933,8 +933,212 @@ int main() {
         std::cout << "[PASS] argmin(dim=2) [index along H] verified (fwd: " << fwd_time << " ms)\n";
     }
 
+    // test 30: Tensor softmax(dim=3) [Softmax along W axis]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        // CPU Reference
+        auto out_cpu = x_cpu->softmax(3);
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
+
+        // GPU Timed Pass
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->softmax(3);
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        // Parity Verification
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] softmax(dim=3) verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 31: Tensor log_softmax(dim=2) [LogSoftmax along H axis]
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        // CPU Reference
+        auto out_cpu = x_cpu->log_softmax(2);
+        x_cpu->ensure_grad_allocated();
+        out_cpu->backward();
+
+        // GPU Timed Pass
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->log_softmax(2);
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        out_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        // arity Verification
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] log_softmax(dim=2) verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 32: Tensor contiguous() with non-contiguous transposed tensor
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        // Create a non-contiguous view via transpose (e.g., swap axes 1 and 2)
+        auto trans_cpu = x_cpu->transpose(1, 2);
+        auto cont_cpu = trans_cpu->contiguous();
+        x_cpu->ensure_grad_allocated();
+        cont_cpu->backward();
+
+        // GPU execution with timing
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto trans_gpu = x_gpu->transpose(1, 2);
+        auto cont_gpu = trans_gpu->contiguous();
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        cont_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        // Parity Verification
+        cont_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(cont_gpu->shape == cont_cpu->shape);
+        assert(cont_gpu->is_contiguous() == true);
+        
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*cont_gpu->data)[i], (*cont_cpu->data)[i]));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+        }
+        std::cout << "[PASS] contiguous() on transposed view verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 33: Tensor argsort(dim=3) on GPU tensor (Thrust sort_by_key integration)
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+
+        // CPU reference argsort along W axis (dim=3)
+        auto out_cpu = x_cpu->argsort(3, false);
+
+        // GPU timed pass using Thrust
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->argsort(3, false);
+        double fwd_time = timer.stop_ms();
+
+        // Parity Verification
+        out_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        assert(out_gpu->requires_grad == false);
+
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        std::cout << "[PASS] argsort(dim=3) verified (fwd: " << fwd_time << " ms)\n";
+    }
+
+    // test 34: CPU vs GPU gradient parity for softmax(dim=1) and log_softmax(dim=1)
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, true, Device::CPU);
+
+        auto sm_cpu = x_cpu->softmax(1);
+        x_cpu->ensure_grad_allocated();
+        sm_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto sm_gpu = x_gpu->softmax(1);
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        sm_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        sm_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*sm_gpu->data)[i], (*sm_cpu->data)[i], 1e-4));
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-4));
+        }
+        std::cout << "[PASS] softmax(dim=1) CPU/GPU autograd parity verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 35: Large-tensor (1,000,000 elements) global sum reduction correctness and timing
+    {
+        const size_t large_elements = 1000000;
+        std::vector<double> large_data(large_elements, 1.5);
+        auto x_cpu = std::make_shared<Tensor>(large_data, std::vector<size_t>{large_elements}, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(large_data, std::vector<size_t>{large_elements}, true, Device::CPU);
+
+        auto sum_cpu = x_cpu->sum();
+        x_cpu->ensure_grad_allocated();
+        sum_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto sum_gpu = x_gpu->sum();
+        double fwd_time = timer.stop_ms();
+
+        timer.start();
+        sum_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        sum_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        assert(close_enough((*sum_gpu->data)[0], 1500000.0, 1e-3));
+        assert(close_enough((*sum_gpu->data)[0], (*sum_cpu->data)[0], 1e-3));
+        assert(close_enough((*x_gpu->grad)[0], (*x_cpu->grad)[0], 1e-4));
+        assert(close_enough((*x_gpu->grad)[large_elements - 1], (*x_cpu->grad)[large_elements - 1], 1e-4));
+        std::cout << "[PASS] large-tensor global sum (1M elements) verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 36: True on-device argsort along non-innermost dimension (dim=1) with descending=true
+    {
+        auto a_raw = generate_4d_data(num_elements);
+        auto x_cpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(a_raw, shape_4d, false, Device::CPU);
+
+        auto out_cpu = x_cpu->argsort(1, true);
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = x_gpu->argsort(1, true);
+        double fwd_time = timer.stop_ms();
+
+        out_gpu->to(Device::CPU);
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < num_elements; ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+        }
+        std::cout << "[PASS] argsort(dim=1, descending=true) strided GPU verified (fwd: " << fwd_time << " ms)\n";
+    }
+
     std::cout << "==========================================\n";
-    std::cout << "[PASS] all 29 GPU tests and latency benchmarks verified cleanly!\n";
+    std::cout << "[PASS] all GPU tests and latency benchmarks verified cleanly!\n";
     std::cout << "==========================================\n";
 
     return 0;

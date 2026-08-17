@@ -473,6 +473,61 @@ int main() {
     assert(close_enough((*s_logits->grad)[4], -0.01766872)); 
     std::cout << "[PASS] sparse categorical cross entropy loss operations and auto-differentiation verified\n";
 
+    // test 23: verifying cpu scalar multiplication backward pass with requires_grad=true and requires_grad=false
+    {
+        auto t_grad = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, true);
+        auto out_grad = t_grad * 4.0;
+        out_grad->backward();
+        assert(t_grad->grad != nullptr);
+        assert(close_enough((*t_grad->grad)[0], 4.0));
+        assert(close_enough((*t_grad->grad)[1], 4.0));
+        assert(close_enough((*t_grad->grad)[2], 4.0));
+
+        // verify requires_grad=false does not allocate gradient or crash
+        auto t_nograd = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{3}, false);
+        auto out_nograd = t_nograd * 4.0;
+        out_nograd->backward();
+        assert(t_nograd->grad == nullptr);
+        std::cout << "[PASS] cpu scalar multiplication backward with requires_grad true/false verified\n";
+    }
+
+    // test 24: verifying cpu softmax and log_softmax autograd gradient propagation
+    {
+        auto x_sm = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{1, 3}, true);
+        auto sm = x_sm->softmax(1);
+        sm->backward();
+        assert(x_sm->grad != nullptr);
+        assert(x_sm->grad->size() == 3);
+        // analytical sum of softmax gradient across dimension must equal 0.0
+        double sum_g = (*x_sm->grad)[0] + (*x_sm->grad)[1] + (*x_sm->grad)[2];
+        assert(close_enough(sum_g, 0.0));
+
+        auto x_lsm = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{1, 3}, true);
+        auto lsm = x_lsm->log_softmax(1);
+        lsm->backward();
+        assert(x_lsm->grad != nullptr);
+        assert(x_lsm->grad->size() == 3);
+        // for log_softmax with upstream grad of 1.0, sum of gradients is 3.0 - 3.0 * sum(softmax) = 0.0
+        double sum_lg = (*x_lsm->grad)[0] + (*x_lsm->grad)[1] + (*x_lsm->grad)[2];
+        assert(close_enough(sum_lg, 0.0));
+        std::cout << "[PASS] cpu standalone softmax and log_softmax autograd gradient propagation verified\n";
+    }
+
+    // test 25: verifying global sum reduction on cpu
+    {
+        std::vector<double> vals = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
+        auto t_sum = std::make_shared<Tensor>(vals, std::vector<size_t>{2, 3}, true);
+        auto s_out = t_sum->sum();
+        assert(s_out->shape.size() == 1 && s_out->shape[0] == 1);
+        assert(close_enough((*s_out->data)[0], 21.0));
+        s_out->backward();
+        assert(t_sum->grad->size() == 6);
+        for (size_t i = 0; i < 6; ++i) {
+            assert(close_enough((*t_sum->grad)[i], 1.0));
+        }
+        std::cout << "[PASS] cpu global sum forward and backward propagation verified\n";
+    }
+
     std::cout << "[PASS] all tests passed cleanly\n";
     return 0;
 }
