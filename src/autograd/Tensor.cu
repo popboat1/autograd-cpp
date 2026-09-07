@@ -32,6 +32,17 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requi
             strides[i] = strides[i + 1] * this->shape[i + 1];
         }
     }
+
+    if(this->device == Device::CUDA){
+        size_t bytes = data->size() * sizeof(double);
+        CUDA_CHECK(cudaMalloc(&cuda_data, bytes));
+        CUDA_CHECK(cudaMemcpy(
+            cuda_data,
+            data->data(),
+            bytes,
+            cudaMemcpyHostToDevice
+        ));
+    }
 }
 
 // graph constructor for operations
@@ -54,11 +65,38 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vecto
             this->requires_grad = true;
         }
     }
+
+    if(this->device == Device::CUDA){
+        size_t bytes = data->size() * sizeof(double);
+        CUDA_CHECK(cudaMalloc(&cuda_data, bytes));
+        CUDA_CHECK(cudaMemcpy(
+            cuda_data,
+            data->data(),
+            bytes,
+            cudaMemcpyHostToDevice
+        ));
+    }
 }
 
 // zero-copy view constructor
-Tensor::Tensor(std::shared_ptr<std::vector<double>> shared_data, std::shared_ptr<std::vector<double>> shared_grad, std::vector<size_t> shape, std::vector<TensorPtr> children, std::string operation, Device device)
-    : data(std::move(shared_data)), grad(std::move(shared_grad)), shape(std::move(shape)), requires_grad(false), prev(std::move(children)), op(std::move(operation)), backward_func([](){}), device(device) {
+Tensor::Tensor(
+    std::shared_ptr<std::vector<double>> shared_data, 
+    std::shared_ptr<std::vector<double>> shared_grad, 
+    std::vector<size_t> shape, 
+    std::vector<TensorPtr> children, 
+    std::string operation, 
+    Device device
+)
+    : data(std::move(shared_data)), 
+    grad(std::move(shared_grad)), 
+    shape(std::move(shape)), 
+    requires_grad(false), 
+    prev(std::move(children)), 
+    op(std::move(operation)), 
+    backward_func([](){}), 
+    device(device), 
+    is_view(true) 
+{
     
     strides.resize(this->shape.size(), 1);
     if (!this->shape.empty()) {
@@ -69,6 +107,13 @@ Tensor::Tensor(std::shared_ptr<std::vector<double>> shared_data, std::shared_ptr
 
     for (const auto& child : prev) {
         if (child->requires_grad) this->requires_grad = true;
+    }
+
+    if(this->device == Device::CUDA && !prev.empty() && prev[0] != nullptr){
+        this->cuda_data = prev[0]->cuda_data;
+        if(this->grad == prev[0]->grad){
+            this->cuda_grad = prev[0]->cuda_grad;
+        }
     }
 }
 
@@ -108,14 +153,16 @@ void Tensor::to(Device target_device){
 
 // destructor
 Tensor::~Tensor(){
-    if (cuda_data) {
-        if (cudaFree(cuda_data) != cudaSuccess) {
-            std::cerr << "fatal error: Failed to free cuda data!" << std::endl;
+    if(!is_view){
+        if (cuda_data) {
+            if (cudaFree(cuda_data) != cudaSuccess) {
+                std::cerr << "fatal error: Failed to free cuda data!" << std::endl;
+            }
         }
-    }
-    if (cuda_grad) {
-        if (cudaFree(cuda_grad) != cudaSuccess) {
-            std::cerr << "fatal error: Failed to free cuda grad!" << std::endl;
+        if (cuda_grad) {
+            if (cudaFree(cuda_grad) != cudaSuccess) {
+                std::cerr << "fatal error: Failed to free cuda grad!" << std::endl;
+            }
         }
     }
 }
@@ -1357,15 +1404,19 @@ inline void launch_log_softmax_backward(
 
 void Tensor::ensure_grad_allocated(){
     if(grad == nullptr){
-        grad = (std::make_shared<std::vector<double>>(data->size(), 0.0));
+        grad = std::make_shared<std::vector<double>>(data->size(), 0.0);
+    }
 
-        // alloc in GPU if on GPU
-        if (device == Device::CUDA){
+    // ensure device buffer exists independently of host grad state
+    if (device == Device::CUDA && cuda_grad == nullptr){
+        if (is_view && !prev.empty() && prev[0] != nullptr) {
+            prev[0]->ensure_grad_allocated();
+            cuda_grad = prev[0]->cuda_grad;
+        } else {
             size_t bytes = data->size() * sizeof(double);
             CUDA_CHECK(cudaMalloc(&cuda_grad, bytes));
-            // copy the zeros from cpu
-            CUDA_CHECK(cudaMemcpy(cuda_grad, grad->data(), bytes, cudaMemcpyHostToDevice));
-        }
+            CUDA_CHECK(cudaMemset(cuda_grad, 0, bytes));
+        }   
     }
 }
 
@@ -2577,7 +2628,7 @@ TensorPtr Tensor::transpose(size_t dim0, size_t dim1) {
     }
 
     // build the new output tensor
-    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "transpose");
+    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "transpose", this->device);
     out->strides = new_strides; // override default contigous layout strides
 
     return out;
@@ -3538,6 +3589,7 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
         );
     } else {
         // --- cpu
+        double* out_ptr = out->data->data();
         for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
             for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
                 size_t out_flat = outer * meta.inner_block_size + inner;
@@ -3566,7 +3618,7 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
                         best_flat_idx = self_flat;
                     }
                 }
-                out_vals[out_flat] = current_max;
+                out_ptr[out_flat] = current_max;
                 (*max_indices)[out_flat] = best_flat_idx;
             }
         }
@@ -3627,6 +3679,7 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
             minReduceOp()
         );
     } else {
+        double* out_ptr = out->data->data();
         for(size_t outer {0}; outer < meta.outer_block_size; ++outer){
             for(size_t inner {0}; inner < meta.inner_block_size; ++inner){
                 size_t out_flat = outer * meta.inner_block_size + inner;
@@ -3655,7 +3708,7 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
                         best_flat_idx = self_flat;
                     }
                 }
-                out_vals[out_flat] = current_min;
+                out_ptr[out_flat] = current_min;
                 (*min_indices)[out_flat] = best_flat_idx;
             }
         }
@@ -3864,7 +3917,7 @@ TensorPtr Tensor::squeeze(size_t dim){
         this->ensure_grad_allocated();
     }
 
-    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "squeeze");
+    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "squeeze", this->device);
     out->strides = new_strides;
     return out;
 }
@@ -3891,7 +3944,7 @@ TensorPtr Tensor::unsqueeze(size_t dim) {
         this->ensure_grad_allocated();
     }
 
-    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "unsqueeze");
+    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "unsqueeze", this->device);
     out->strides = new_strides;
     return out;
 }
@@ -3928,7 +3981,7 @@ TensorPtr Tensor::permute(const std::vector<size_t>& dims) {
     }
 
     // permute creates a non-contiguous structural view node
-    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "permute");
+    auto out = std::make_shared<Tensor>(this->data, this->grad, new_shape, std::vector<TensorPtr>{shared_from_this()}, "permute", this->device);
     out->strides = new_strides;
     return out;
 }
@@ -4346,20 +4399,32 @@ void Tensor::backward() {
     }
 
     // clear gradients of intermediate nodes for this pass
-    std::set<std::vector<double>*> cleared_buffers;
+    // std::set<std::vector<double>*> cleared_buffers;
 
-    for(auto& node : topo){
-        if(node->requires_grad && !node->prev.empty() && node != shared_from_this()){
-            if(node->grad && cleared_buffers.find(node->grad.get()) == cleared_buffers.end()){
-                cleared_buffers.insert(node->grad.get());
-                std::fill(node->grad->begin(), node->grad->end(), 0.0); // clean pass reset
-            }
-        }
-    }
+    // for(auto& node : topo){
+    //     if(node->requires_grad && !node->prev.empty() && node != shared_from_this()){
+    //         if(node->grad && cleared_buffers.find(node->grad.get()) == cleared_buffers.end()){
+    //             cleared_buffers.insert(node->grad.get());
+    //             std::fill(node->grad->begin(), node->grad->end(), 0.0); // clean pass reset
+    //             if (node->device == Device::CUDA && node->cuda_grad != nullptr) {
+    //                 size_t bytes = node->grad->size() * sizeof(double);
+    //                 CUDA_CHECK(cudaMemset(node->cuda_grad, 0, bytes));
+    //             }
+    //         }
+    //     }
+    // }
 
     // out node start with grad 1.0
     this->ensure_grad_allocated();
     std::fill(grad->begin(), grad->end(), 1.0);
+    if(this->device == Device::CUDA && this->cuda_grad != nullptr){
+        CUDA_CHECK(cudaMemcpy(
+            this->cuda_grad,
+            this->grad->data(),
+            this->grad->size() * sizeof(double),
+            cudaMemcpyHostToDevice
+        ));
+    }
 
     // process nodes in reverse topo order
     for(auto it = topo.rbegin(); it != topo.rend(); ++it){
@@ -4420,7 +4485,7 @@ TensorPtr Tensor::view(const std::vector<int>& target_shape){
     }
 
     // construct and return the view tracking node sharing the original flat data block
-    auto out = std::make_shared<Tensor>(this->data, this->grad, resolved_shape, std::vector<TensorPtr>{shared_from_this()}, "view");
+    auto out = std::make_shared<Tensor>(this->data, this->grad, resolved_shape, std::vector<TensorPtr>{shared_from_this()}, "view", this->device);
     out->strides = new_strides;
 
     return out;

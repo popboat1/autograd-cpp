@@ -62,6 +62,7 @@ public:
 
     double* cuda_data = nullptr;
     double* cuda_grad = nullptr;
+    bool is_view = false;
 
     // device property
     Device device = Device::CPU;
