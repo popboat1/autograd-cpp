@@ -1,10 +1,10 @@
 #include <iostream>
 #include <vector>
-#include <cassert>
 #include <cmath>
 #include <chrono>
 #include <iomanip>
 #include <cuda_runtime.h>
+#include "test_utils.h"
 #include "autograd/Tensor.h"
 
 // helper to assert floating point parity smoothly

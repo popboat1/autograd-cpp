@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
-#include <cassert>
 #include <cmath>
+#include "test_utils.h"
 #include "autograd/Tensor.h"
 #include "nn/Linear.h"
 #include "nn/Conv2D.h"
