@@ -1525,6 +1525,10 @@ void Tensor::zero_grad() {
     if (grad) {
         std::fill(grad->begin(), grad->end(), 0.0);
     }
+    if(device == Device::CUDA && cuda_grad != nullptr){
+        size_t bytes = data->size() * sizeof(double);
+        CUDA_CHECK(cudaMemset(cuda_grad, 0, bytes));
+    }
 }
 
 
@@ -4398,21 +4402,20 @@ void Tensor::backward() {
         }
     }
 
-    // clear gradients of intermediate nodes for this pass
-    // std::set<std::vector<double>*> cleared_buffers;
+    // save prior gradients of intermediate nodes and reset them to 0.0 for this pass
+    std::vector<std::pair<TensorPtr, std::vector<double>>> saved_intermediate_grads;
 
-    // for(auto& node : topo){
-    //     if(node->requires_grad && !node->prev.empty() && node != shared_from_this()){
-    //         if(node->grad && cleared_buffers.find(node->grad.get()) == cleared_buffers.end()){
-    //             cleared_buffers.insert(node->grad.get());
-    //             std::fill(node->grad->begin(), node->grad->end(), 0.0); // clean pass reset
-    //             if (node->device == Device::CUDA && node->cuda_grad != nullptr) {
-    //                 size_t bytes = node->grad->size() * sizeof(double);
-    //                 CUDA_CHECK(cudaMemset(node->cuda_grad, 0, bytes));
-    //             }
-    //         }
-    //     }
-    // }
+    for (auto& node : topo) {
+        if (node->requires_grad && !node->prev.empty() && node != shared_from_this() && !node->is_view) {
+            if (node->device == Device::CPU && node->grad) {
+                saved_intermediate_grads.emplace_back(node, *(node->grad));
+                std::fill(node->grad->begin(), node->grad->end(), 0.0);
+            } else if (node->device == Device::CUDA && node->cuda_grad != nullptr) {
+                size_t bytes = node->data->size() * sizeof(double);
+                CUDA_CHECK(cudaMemset(node->cuda_grad, 0, bytes));
+            }
+        }
+    }
 
     // out node start with grad 1.0
     this->ensure_grad_allocated();
@@ -4430,6 +4433,16 @@ void Tensor::backward() {
     for(auto it = topo.rbegin(); it != topo.rend(); ++it){
         if ((*it)->requires_grad){
             (*it)->backward_func();
+        }
+    }
+
+    // restore and accumulate previous gradients for intermediate nodes
+    for (auto& item : saved_intermediate_grads) {
+        auto& node = item.first;
+        auto& old_grad = item.second;
+
+        for (size_t i = 0; i < old_grad.size(); ++i) {
+            (*node->grad)[i] += old_grad[i];
         }
     }
 }

@@ -28,8 +28,8 @@ endif()
 include(CheckIPOSupported)
 check_ipo_supported(RESULT ipo_supported OUTPUT error)
 if(ipo_supported)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-    message(STATUS "Link-Time Optimization (LTO) enabled for Release builds")
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF)
+    message(STATUS "Link-Time Optimization (LTO) disabled for Release builds")
 endif()
 
 # multi threading with openmp
@@ -61,8 +61,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(pybind11)
 
-add_executable(autograd_main
-    src/main.cpp
+# compile framework core
+add_library(autograd_core STATIC
     src/autograd/Tensor.cu
     src/nn/Linear.cpp
     src/nn/MLP.cpp
@@ -75,25 +75,17 @@ add_executable(autograd_main
     src/nn/BatchNorm2D.cpp
     src/nn/Sequential.cpp
 )
-target_link_libraries(autograd_main PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
+set_target_properties(autograd_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(autograd_core PUBLIC OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
 
-# compile to python library
-pybind11_add_module(autograd_cpp 
-    src/autograd/bindings.cpp
-    src/autograd/Tensor.cu
-    src/nn/Linear.cpp
-    src/nn/MLP.cpp
-    src/optim/SGD.cpp
-    src/optim/Adam.cpp
-    src/nn/Loss.cpp
-    src/nn/Conv2D.cpp
-    src/nn/MaxPool2D.cpp
-    src/nn/AvgPool2D.cpp
-    src/nn/BatchNorm2D.cpp
-    src/nn/Sequential.cpp
-)
+# main executable
+add_executable(autograd_main src/main.cpp)
+target_link_libraries(autograd_main PRIVATE autograd_core)
+
+# python module
+pybind11_add_module(autograd_cpp src/autograd/bindings.cpp)
 target_link_options(autograd_cpp PRIVATE "-static-libgcc" "-static-libstdc++")
-target_link_libraries(autograd_cpp PRIVATE OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
+target_link_libraries(autograd_cpp PRIVATE autograd_core)
 
 set_target_properties(autograd_cpp PROPERTIES 
     PREFIX ""
