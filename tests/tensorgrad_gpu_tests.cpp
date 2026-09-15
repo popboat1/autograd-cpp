@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include "test_utils.h"
 #include "autograd/Tensor.h"
+#include "nn/Conv2D.h"
 
 // helper to assert floating point parity smoothly
 bool close_enough(double a, double b, double tol = 1e-4) {
@@ -1135,6 +1136,72 @@ int main() {
             assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] argsort(dim=1, descending=true) strided GPU verified (fwd: " << fwd_time << " ms)\n";
+    }
+
+    // test 37: Conv2D forward (im2col) and backward (col2im) CPU vs GPU parity
+    {
+        // Batch=2, InChannels=3, Height=8, Width=8
+        const size_t B = 2, C_in = 3, H = 8, W = 8;
+        const size_t C_out = 4, K = 3, stride = 1, pad = 1;
+        const size_t total_in = B * C_in * H * W;
+
+        auto in_raw = generate_4d_data(total_in, 1.0, 0.5);
+        auto x_cpu = std::make_shared<Tensor>(in_raw, std::vector<size_t>{B, C_in, H, W}, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(in_raw, std::vector<size_t>{B, C_in, H, W}, true, Device::CPU);
+
+        auto conv_cpu = std::make_shared<Conv2D>(C_in, C_out, K, stride, pad);
+        auto conv_gpu = std::make_shared<Conv2D>(C_in, C_out, K, stride, pad);
+
+        // Synchronize initial weights and bias so both layers start identical
+        conv_gpu->weight = std::make_shared<Tensor>(*conv_cpu->weight->data, conv_cpu->weight->shape, true, Device::CPU);
+        conv_gpu->bias = std::make_shared<Tensor>(*conv_cpu->bias->data, conv_cpu->bias->shape, true, Device::CPU);
+
+        // 1. CPU forward & backward pass
+        auto out_cpu = conv_cpu->forward(x_cpu);
+        auto loss_cpu = out_cpu->sum();
+        x_cpu->ensure_grad_allocated();
+        loss_cpu->backward();
+
+        // 2. GPU forward & backward pass with latency timing
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = conv_gpu->forward(x_gpu);
+        double fwd_time = timer.stop_ms();
+
+        auto loss_gpu = out_gpu->sum();
+        timer.start();
+        loss_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        // 3. Move GPU results back to host for assertion
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        conv_gpu->weight->to(Device::CPU);
+        conv_gpu->bias->to(Device::CPU);
+
+        // Verify forward output activations
+        assert(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i], 1e-3));
+        }
+
+        // Verify col2im input image gradient routing
+        for (size_t i = 0; i < total_in; ++i) {
+            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-3));
+        }
+
+        // Verify filter weight gradients
+        for (size_t i = 0; i < conv_cpu->weight->data->size(); ++i) {
+            assert(close_enough((*conv_gpu->weight->grad)[i], (*conv_cpu->weight->grad)[i], 1e-3));
+        }
+
+        // Verify channel bias gradients
+        for (size_t i = 0; i < conv_cpu->bias->data->size(); ++i) {
+            assert(close_enough((*conv_gpu->bias->grad)[i], (*conv_cpu->bias->grad)[i], 1e-3));
+        }
+
+        std::cout << "[PASS] Conv2D forward (im2col) & backward (col2im) CPU/GPU parity verified (fwd: " 
+                  << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
     std::cout << "==========================================\n";

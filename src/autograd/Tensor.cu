@@ -2386,6 +2386,10 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
         throw std::invalid_argument("both inputs to matmul must be at least 2D tensors.");
     }
 
+    // ensure inputs are contiguous so cuBLAS leading dimensions align with memory
+    auto active_lhs = lhs->is_contiguous() ? lhs : lhs->contiguous();
+    auto active_rhs = rhs->is_contiguous() ? rhs : rhs->contiguous();
+
     size_t lhs_rank = lhs->shape.size();
     size_t rhs_rank = rhs->shape.size();
 

@@ -101,6 +101,77 @@ std::shared_ptr<std::vector<double>> Conv2D::im2col(const TensorPtr& input, size
     return col_matrix;
 }
 
+// im2col kernel
+__global__ void d_im2col(
+    const double* __restrict__ input_data,
+    double* __restrict__ col_data,
+    size_t total_elements,
+    size_t batch_size,
+    size_t in_c, size_t in_h, size_t in_w,
+    size_t out_h, size_t out_w,
+    size_t k_size, size_t stride, size_t padding
+){
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_elements) return;
+
+    size_t col_cols = in_c * k_size * k_size;
+    size_t spatial_out = out_h * out_w;
+
+    // deconstruct flat idx into matrix (row, col)
+    size_t row = idx / col_cols;
+    size_t col = idx % col_cols;
+
+    // deconstruct matrix into (b, oh, ow)
+    size_t b = row / spatial_out;
+    size_t spatial_idx = row % spatial_out;
+    size_t oh = spatial_idx / out_w;
+    size_t ow = spatial_idx % out_w;
+
+    // deconstruct matrix cols into (ci, kh, kw)
+    size_t kernel_spatial = k_size * k_size;
+    size_t ci = col / kernel_spatial;
+    size_t k_idx = col % kernel_spatial;
+    size_t kh = k_idx / k_size;
+    size_t kw = k_idx % k_size;
+
+    // map to input coordinates (with stride and padding)
+    int h_in = static_cast<int>(oh * stride + kh) - static_cast<int>(padding);
+    int w_in = static_cast<int>(ow * stride + kw) - static_cast<int>(padding);
+
+    // zero-padding check and coalesced write
+    if (h_in >= 0 && h_in < static_cast<int>(in_h) &&
+        w_in >= 0 && w_in < static_cast<int>(in_w)) {
+        size_t input_idx = b * (in_c * in_h * in_w) +
+                           ci * (in_h * in_w) +
+                           static_cast<size_t>(h_in) * in_w +
+                           static_cast<size_t>(w_in);
+        col_data[idx] = input_data[input_idx];
+    } else {
+        col_data[idx] = 0.0;
+    }
+}
+
+// im2col kernel launcher
+inline void launch_im2col_forward(
+    const double* d_input,
+    double* d_col,
+    size_t batch_size,
+    size_t in_c, size_t in_h, size_t in_w,
+    size_t out_h, size_t out_w,
+    size_t k_size, size_t stride, size_t padding
+) {
+    size_t total_elements = (batch_size * out_h * out_w) * (in_c * k_size * k_size);
+    constexpr int block_threads = 256;
+    int blocks = cuda_utils::ceil_div(static_cast<int>(total_elements), block_threads);
+
+    d_im2col<<<blocks, block_threads>>>(
+        d_input, d_col, total_elements,
+        batch_size, in_c, in_h, in_w,
+        out_h, out_w, k_size, stride, padding
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 // col2im
 // aggregate 2d column matrix values back into a 4d target image gradient array
 void Conv2D::col2im(const std::vector<double>& col_grad, const TensorPtr& input_grad, size_t out_h, size_t out_w) const {
@@ -152,8 +223,81 @@ void Conv2D::col2im(const std::vector<double>& col_grad, const TensorPtr& input_
     }
 }
 
+// col2im kernel
+__global__ void d_col2im(
+    const double* __restrict__ col_grad,
+    double* __restrict__ input_grad,
+    size_t total_elements,
+    size_t batch_size,
+    size_t in_c, size_t in_h, size_t in_w,
+    size_t out_h, size_t out_w,
+    size_t k_size, size_t stride, size_t padding
+){
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx >= total_elements) return;
+
+    size_t col_cols = in_c * k_size * k_size;
+    size_t spatial_out = out_w * out_h;
+
+    // deconstruct flat idx into matrix (row, col)
+    size_t row = idx / col_cols;
+    size_t col = idx % col_cols;
+
+    // deconstruct matrix row into (b, oh, ow)
+    size_t b = row / spatial_out;
+    size_t spatial_idx = row % spatial_out;
+    size_t oh = spatial_idx / out_w;
+    size_t ow = spatial_idx % out_w;
+
+    // deconstruct matrix col into (ci, kh, kw)
+    size_t kernel_spatial = k_size * k_size;
+    size_t ci = col / kernel_spatial;
+    size_t k_idx = col % kernel_spatial;
+    size_t kh = k_idx / k_size;
+    size_t kw = k_idx % k_size;
+
+    // map to original input image coordinates
+    int h_in = static_cast<int>(oh * stride + kh) - static_cast<int>(padding);
+    int w_in = static_cast<int>(ow * stride + kw) - static_cast<int>(padding);
+
+    // scatter-accumulate gradients back into input tensor
+    if (h_in >= 0 && h_in < static_cast<int>(in_h) &&
+        w_in >= 0 && w_in < static_cast<int>(in_w)) {
+        size_t input_idx = b * (in_c * in_h * in_w) +
+                           ci * (in_h * in_w) +
+                           static_cast<size_t>(h_in) * in_w +
+                           static_cast<size_t>(w_in);
+        atomicAdd(&input_grad[input_idx], col_grad[idx]);
+    }
+}
+
+// col2im launcher
+inline void launch_col2im_backward(
+    const double* d_col_grad,
+    double* d_input_grad,
+    size_t batch_size,
+    size_t in_c, size_t in_h, size_t in_w,
+    size_t out_h, size_t out_w,
+    size_t k_size, size_t stride, size_t padding
+) {
+    size_t total_elements = (batch_size * out_h * out_w) * (in_c * k_size * k_size);
+    constexpr int block_threads = 256;
+    int blocks = cuda_utils::ceil_div(static_cast<int>(total_elements), block_threads);
+
+    d_col2im<<<blocks, block_threads>>>(
+        d_col_grad, d_input_grad, total_elements,
+        batch_size, in_c, in_h, in_w,
+        out_h, out_w, k_size, stride, padding
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 TensorPtr Conv2D::forward(const TensorPtr& input){
     auto x = input->is_contiguous() ? input : input->contiguous();
+
+    // synchronize parameter device placement
+    if (weight->device != x->device) weight->to(x->device);
+    if (bias->device != x->device) bias->to(x->device);
 
     // unpack dimensions
     size_t batch_size = x->shape[0];
@@ -165,18 +309,46 @@ TensorPtr Conv2D::forward(const TensorPtr& input){
     size_t out_h = ((in_h - kernel_size + 2 * padding) / stride) + 1;
     size_t out_w = ((in_w - kernel_size + 2 * padding) / stride) + 1;
 
-    auto col_data_ptr = im2col(x, out_h, out_w);
-
     // package unrolled parameters into a tracking graph node
     size_t col_rows = batch_size * out_h * out_w;
     size_t col_cols = in_channels * kernel_size * kernel_size;
-    auto input_col_tensor = std::make_shared<Tensor>(col_data_ptr, nullptr, std::vector<size_t>{col_rows, col_cols}, std::vector<TensorPtr>{x}, "im2col");
+
+    TensorPtr input_col_tensor = nullptr;
+
+    // forward im2col
+    if(x->device == Device::CUDA){
+        std::vector<double> dummy(col_rows * col_cols, 0.0);
+        input_col_tensor = std::make_shared<Tensor>(
+            std::move(dummy),
+            std::vector<size_t>{col_rows, col_cols},
+            std::vector<TensorPtr>{x},
+            "im2col",
+            Device::CUDA
+        );
+
+        launch_im2col_forward(
+            x->cuda_data.get(),
+            input_col_tensor->cuda_data.get(),
+            batch_size, in_c, in_h, in_w,
+            out_h, out_w, kernel_size, stride, padding
+        );
+    } else {
+        auto col_data_ptr = im2col(x, out_h, out_w);
+        input_col_tensor = std::make_shared<Tensor>(
+            col_data_ptr,
+            nullptr,
+            std::vector<size_t>{col_rows, col_cols},
+            std::vector<TensorPtr>{x},
+            "im2col",
+            Device::CPU
+        );
+    }
 
     // flatten weights parameters to 2D footprint using existing tool
     auto weights_2d = weight->view({static_cast<int>(out_channels), static_cast<int>(col_cols)});
 
     // general matrix multiplication (gemm) pass invocation
-    auto weights_t = weights_2d->transpose(0, 1);
+    auto weights_t = weights_2d->transpose(0, 1)->contiguous();
     auto gemm_out = Tensor::matmul(input_col_tensor, weights_t);
 
     // accumulate layer channel biases via standard broadcasting
@@ -184,8 +356,8 @@ TensorPtr Conv2D::forward(const TensorPtr& input){
 
     // map the true NHWC layout first
     auto intermediate_nhwc = gemm_out_biased->view({
-        static_cast<int>(batch_size), 
-        static_cast<int>(out_h), 
+        static_cast<int>(batch_size),
+        static_cast<int>(out_h),
         static_cast<int>(out_w),
         static_cast<int>(out_channels)
     });
@@ -204,8 +376,16 @@ TensorPtr Conv2D::forward(const TensorPtr& input){
         auto this_ptr = weak_this.lock();
         
         // only execute backpropagation if all components are alive in memory
-        if (this_ptr && x_ptr && col_ptr) {
-            if (x_ptr->requires_grad) {
+        if (this_ptr && x_ptr && col_ptr && x_ptr->requires_grad) {
+            if (x_ptr->device == Device::CUDA) {
+                launch_col2im_backward(
+                    col_ptr->cuda_grad.get(),
+                    x_ptr->cuda_grad.get(),
+                    x_ptr->shape[0], x_ptr->shape[1], x_ptr->shape[2], x_ptr->shape[3],
+                    out_h, out_w,
+                    this_ptr->kernel_size, this_ptr->stride, this_ptr->padding
+                );
+            } else {
                 this_ptr->col2im(*col_ptr->grad, x_ptr, out_h, out_w);
             }
         }
