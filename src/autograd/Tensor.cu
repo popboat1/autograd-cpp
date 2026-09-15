@@ -35,9 +35,11 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, bool requi
 
     if(this->device == Device::CUDA){
         size_t bytes = data->size() * sizeof(double);
-        CUDA_CHECK(cudaMalloc(&cuda_data, bytes));
+        double* d_ptr = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_ptr, bytes));
+        this->cuda_data = std::shared_ptr<double>(d_ptr, cuda_utils::CudaDeleter{});
         CUDA_CHECK(cudaMemcpy(
-            cuda_data,
+            this->cuda_data.get(),
             data->data(),
             bytes,
             cudaMemcpyHostToDevice
@@ -68,9 +70,11 @@ Tensor::Tensor(std::vector<double> values, std::vector<size_t> shape, std::vecto
 
     if(this->device == Device::CUDA){
         size_t bytes = data->size() * sizeof(double);
-        CUDA_CHECK(cudaMalloc(&cuda_data, bytes));
+        double* d_ptr = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_ptr, bytes));
+        this->cuda_data = std::shared_ptr<double>(d_ptr, cuda_utils::CudaDeleter{});
         CUDA_CHECK(cudaMemcpy(
-            cuda_data,
+            this->cuda_data.get(),
             data->data(),
             bytes,
             cudaMemcpyHostToDevice
@@ -94,8 +98,7 @@ Tensor::Tensor(
     prev(std::move(children)), 
     op(std::move(operation)), 
     backward_func([](){}), 
-    device(device), 
-    is_view(true) 
+    device(device)
 {
     
     strides.resize(this->shape.size(), 1);
@@ -128,22 +131,24 @@ void Tensor::to(Device target_device){
 
     if(target_device == Device::CUDA){
         // cpu -> gpu
-        CUDA_CHECK(cudaMalloc(&cuda_data, bytes));
-        CUDA_CHECK(cudaMemcpy(cuda_data, data->data(), bytes, cudaMemcpyHostToDevice));
+        double* d_dataPtr = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_dataPtr, bytes));
+        this->cuda_data = std::shared_ptr<double>(d_dataPtr, cuda_utils::CudaDeleter{});
+        CUDA_CHECK(cudaMemcpy(this->cuda_data.get(), data->data(), bytes, cudaMemcpyHostToDevice));
 
         if(grad){
-            CUDA_CHECK(cudaMalloc(&cuda_grad, bytes));
-            CUDA_CHECK(cudaMemcpy(cuda_grad, grad->data(), bytes, cudaMemcpyHostToDevice));
+            double* d_gradPtr = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_gradPtr, bytes));
+            this->cuda_grad = std::shared_ptr<double>(d_gradPtr, cuda_utils::CudaDeleter{});
+            CUDA_CHECK(cudaMemcpy(this->cuda_grad.get(), grad->data(), bytes, cudaMemcpyHostToDevice));
         }
     } else if(target_device == Device::CPU){
         // gpu -> cpu
-        CUDA_CHECK(cudaMemcpy(data->data(), cuda_data, bytes, cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaFree(cuda_data));
+        CUDA_CHECK(cudaMemcpy(data->data(), cuda_data.get(), bytes, cudaMemcpyDeviceToHost));
         cuda_data = nullptr;
 
         if(grad && cuda_grad){
-            CUDA_CHECK(cudaMemcpy(grad->data(), cuda_grad, bytes, cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaFree(cuda_grad));
+            CUDA_CHECK(cudaMemcpy(grad->data(), cuda_grad.get(), bytes, cudaMemcpyDeviceToHost));
             cuda_grad = nullptr;
         }
     }
@@ -153,18 +158,8 @@ void Tensor::to(Device target_device){
 
 // destructor
 Tensor::~Tensor(){
-    if(!is_view){
-        if (cuda_data) {
-            if (cudaFree(cuda_data) != cudaSuccess) {
-                std::cerr << "fatal error: Failed to free cuda data!" << std::endl;
-            }
-        }
-        if (cuda_grad) {
-            if (cudaFree(cuda_grad) != cudaSuccess) {
-                std::cerr << "fatal error: Failed to free cuda grad!" << std::endl;
-            }
-        }
-    }
+    // std::shared_ptr with CudaDeleter automatically frees GPU memory
+    // when the last reference/view goes out of scope.
 }
 
 
@@ -1409,14 +1404,16 @@ void Tensor::ensure_grad_allocated(){
 
     // ensure device buffer exists independently of host grad state
     if (device == Device::CUDA && cuda_grad == nullptr){
-        if (is_view && !prev.empty() && prev[0] != nullptr) {
+        if (!prev.empty() && prev[0] != nullptr && this->grad == prev[0]->grad) {
             prev[0]->ensure_grad_allocated();
             cuda_grad = prev[0]->cuda_grad;
         } else {
             size_t bytes = data->size() * sizeof(double);
-            CUDA_CHECK(cudaMalloc(&cuda_grad, bytes));
-            CUDA_CHECK(cudaMemset(cuda_grad, 0, bytes));
-        }   
+            double* d_grad = nullptr;
+            CUDA_CHECK(cudaMalloc(&d_grad, bytes));
+            cuda_grad = std::shared_ptr<double>(d_grad, cuda_utils::CudaDeleter{});
+            CUDA_CHECK(cudaMemset(cuda_grad.get(), 0, bytes));
+        }  
     }
 }
 
@@ -1453,14 +1450,13 @@ TensorPtr Tensor::contiguous() {
             meta.strides[i] = strides[i];
         }
         int blocks = cuda_utils::ceil_div(total_elements, threads);
-        contiguous_forward<<<blocks, threads>>>(this->cuda_data, d_contiguous_data, total_elements, meta);
+        contiguous_forward<<<blocks, threads>>>(this->cuda_data.get(), d_contiguous_data, total_elements, meta);
         CUDA_CHECK(cudaGetLastError());
         
         std::vector<double> dummy(total_elements, 0.0);
         auto out = std::make_shared<Tensor>(std::move(dummy), shape, std::vector<TensorPtr>{shared_from_this()}, "contiguous", Device::CUDA);
         
-        if (out->cuda_data) cudaFree(out->cuda_data);
-        out->cuda_data = d_contiguous_data;
+        out->cuda_data = std::shared_ptr<double>(d_contiguous_data, cuda_utils::CudaDeleter{});
 
 
         // backward pass
@@ -1472,7 +1468,7 @@ TensorPtr Tensor::contiguous() {
                     if (self->device == Device::CUDA) {
                         int blocks = cuda_utils::ceil_div(total_elements, threads);
                         contiguous_backward<<<blocks, threads>>>(
-                            out_ptr->cuda_grad, self->cuda_grad, total_elements, meta
+                            out_ptr->cuda_grad.get(), self->cuda_grad.get(), total_elements, meta
                         );
                         CUDA_CHECK(cudaGetLastError());
                     } else {
@@ -1527,7 +1523,7 @@ void Tensor::zero_grad() {
     }
     if(device == Device::CUDA && cuda_grad != nullptr){
         size_t bytes = data->size() * sizeof(double);
-        CUDA_CHECK(cudaMemset(cuda_grad, 0, bytes));
+        CUDA_CHECK(cudaMemset(cuda_grad.get(), 0, bytes));
     }
 }
 
@@ -1589,18 +1585,18 @@ TensorPtr Tensor::add_(const TensorPtr& other) {
         // --- gpu execution
         if(is_matching_shape){
             launch_binary_forward(
-                this->cuda_data,
-                other->cuda_data,
-                this->cuda_data,
+                this->cuda_data.get(),
+                other->cuda_data.get(),
+                this->cuda_data.get(),
                 total_elements,
                 addForwardOp()
             );
         } else{
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                this->cuda_data,
-                other->cuda_data,
-                this->cuda_data,
+                this->cuda_data.get(),
+                other->cuda_data.get(),
+                this->cuda_data.get(),
                 total_elements,
                 meta,
                 addForwardOp()
@@ -1681,18 +1677,18 @@ TensorPtr Tensor::sub_(const TensorPtr& other) {
         // --- gpu execution
         if(is_matching_shape){
             launch_binary_forward(
-                this->cuda_data,
-                other->cuda_data,
-                this->cuda_data,
+                this->cuda_data.get(),
+                other->cuda_data.get(),
+                this->cuda_data.get(),
                 total_elements,
                 subForwardOp()
             );
         } else {
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                this->cuda_data,
-                other->cuda_data,
-                this->cuda_data,
+                this->cuda_data.get(),
+                other->cuda_data.get(),
+                this->cuda_data.get(),
                 total_elements,
                 meta,
                 subForwardOp()
@@ -1754,9 +1750,9 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
         // --- gpu forward
         if(is_matching_shape){
             launch_binary_forward(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 addForwardOp()
             );
@@ -1765,9 +1761,9 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
             // --- gpu forward with broadcasting
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 meta,
                 addForwardOp()
@@ -1804,20 +1800,20 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
                 if(is_matching_shape){
                     if (lhs->requires_grad) {
                         launch_binary_backward(
-                            lhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            lhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             addLhsGradOp()
                         );
                     }
                     if (rhs->requires_grad) {
                         launch_binary_backward(
-                            rhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            rhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             addRhsGradOp()
                         );
@@ -1828,10 +1824,10 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
                     BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
                     if(lhs->requires_grad){
                         launch_binary_backward_broadcast(
-                            lhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            lhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             meta, 
                             true, 
@@ -1841,10 +1837,10 @@ TensorPtr operator+(const TensorPtr& lhs, const TensorPtr& rhs){
 
                     if(rhs->requires_grad){
                         launch_binary_backward_broadcast(
-                            rhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            rhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             meta, 
                             false, 
@@ -1908,9 +1904,9 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
         // --- gpu forward
         if(is_matching_shape){
             launch_binary_forward(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 subForwardOp()
             );
@@ -1919,9 +1915,9 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
             // --- gpu forward with broadcasting
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 meta,
                 subForwardOp()
@@ -1958,20 +1954,20 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
                 if(is_matching_shape) {
                     if(lhs->requires_grad){
                         launch_binary_backward(
-                            lhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            lhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             subLhsGradOp()
                         );
                     }
                     if(rhs->requires_grad){
                         launch_binary_backward(
-                            rhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            rhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             subRhsGradOp()
                         );
@@ -1982,10 +1978,10 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
                     BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
                     if(lhs->requires_grad){
                         launch_binary_backward_broadcast(
-                            lhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            lhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             meta, 
                             true, 
@@ -1995,10 +1991,10 @@ TensorPtr operator-(const TensorPtr& lhs, const TensorPtr& rhs){
 
                     if(rhs->requires_grad){
                         launch_binary_backward_broadcast(
-                            rhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            rhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             meta, 
                             false, 
@@ -2061,9 +2057,9 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
         // --- gpu
         if(is_matching_shape){
             launch_binary_forward(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 mulForwardOp()
             );
@@ -2072,9 +2068,9 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
             // --- with broadcasting
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 meta,
                 mulForwardOp()
@@ -2110,20 +2106,20 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
                 if(is_matching_shape){
                     if(lhs->requires_grad){
                         launch_binary_backward(
-                            lhs->cuda_grad,
-                            out_ptr->cuda_grad,
-                            lhs->cuda_data,
-                            rhs->cuda_data,
+                            lhs->cuda_grad.get(),
+                            out_ptr->cuda_grad.get(),
+                            lhs->cuda_data.get(),
+                            rhs->cuda_data.get(),
                             total_elements,
                             mulLhsGradOp()
                         );
                     }
                     if(rhs->requires_grad){
                         launch_binary_backward(
-                            rhs->cuda_grad,
-                            out_ptr->cuda_grad,
-                            lhs->cuda_data,
-                            rhs->cuda_data,
+                            rhs->cuda_grad.get(),
+                            out_ptr->cuda_grad.get(),
+                            lhs->cuda_data.get(),
+                            rhs->cuda_data.get(),
                             total_elements,
                             mulRhsGradOp()
                         );
@@ -2134,10 +2130,10 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
                     BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
                     if(lhs->requires_grad){
                         launch_binary_backward_broadcast(
-                            lhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            lhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             meta, 
                             true, 
@@ -2147,10 +2143,10 @@ TensorPtr operator*(const TensorPtr& lhs, const TensorPtr& rhs){
 
                     if(rhs->requires_grad){
                         launch_binary_backward_broadcast(
-                            rhs->cuda_grad, 
-                            out_ptr->cuda_grad, 
-                            lhs->cuda_data, 
-                            rhs->cuda_data, 
+                            rhs->cuda_grad.get(), 
+                            out_ptr->cuda_grad.get(), 
+                            lhs->cuda_data.get(), 
+                            rhs->cuda_data.get(), 
                             total_elements, 
                             meta, 
                             false, 
@@ -2195,8 +2191,8 @@ TensorPtr operator*(const TensorPtr& lhs, double rhs) {
     // --- forward pass
     if(active_lhs->device == Device::CUDA){
         launch_unary_forward(
-            active_lhs->cuda_data,
-            out->cuda_data,
+            active_lhs->cuda_data.get(),
+            out->cuda_data.get(),
             total_elements,
             mulScalarForwardOp(rhs)
         );
@@ -2218,9 +2214,9 @@ TensorPtr operator*(const TensorPtr& lhs, double rhs) {
             if (active_lhs->requires_grad) {
                 if (active_lhs->device == Device::CUDA) {
                     launch_unary_backward(
-                        out_ptr->cuda_grad,
-                        active_lhs->cuda_grad,
-                        active_lhs->cuda_data,
+                        out_ptr->cuda_grad.get(),
+                        active_lhs->cuda_grad.get(),
+                        active_lhs->cuda_data.get(),
                         total_elements,
                         mulScalarBackwardOp(rhs)
                     );
@@ -2267,18 +2263,18 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
     if(active_device == Device::CUDA){
         if (is_matching_shape) {
             launch_binary_forward(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 divForwardOp()
             );
         } else{
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                lhs->cuda_data,
-                rhs->cuda_data,
-                out->cuda_data,
+                lhs->cuda_data.get(),
+                rhs->cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 meta,
                 divForwardOp()
@@ -2311,20 +2307,20 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
                 if(is_matching_shape){
                     if (lhs->requires_grad) {
                         launch_binary_backward(
-                            lhs->cuda_grad,
-                            out_ptr->cuda_grad,
-                            lhs->cuda_data,
-                            rhs->cuda_data,
+                            lhs->cuda_grad.get(),
+                            out_ptr->cuda_grad.get(),
+                            lhs->cuda_data.get(),
+                            rhs->cuda_data.get(),
                             total_elements,
                             divLhsGradOp()
                         );
                     }
                     if (rhs->requires_grad) {
                         launch_binary_backward(
-                            rhs->cuda_grad,
-                            out_ptr->cuda_grad,
-                            lhs->cuda_data,
-                            rhs->cuda_data,
+                            rhs->cuda_grad.get(),
+                            out_ptr->cuda_grad.get(),
+                            lhs->cuda_data.get(),
+                            rhs->cuda_data.get(),
                             total_elements,
                             divRhsGradOp()
                         );
@@ -2333,10 +2329,10 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
                     BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
                     if (lhs->requires_grad) {
                         launch_binary_backward_broadcast(
-                            lhs->cuda_grad,
-                            out_ptr->cuda_grad,
-                            lhs->cuda_data,
-                            rhs->cuda_data,
+                            lhs->cuda_grad.get(),
+                            out_ptr->cuda_grad.get(),
+                            lhs->cuda_data.get(),
+                            rhs->cuda_data.get(),
                             total_elements,
                             meta,
                             true,
@@ -2345,10 +2341,10 @@ TensorPtr operator/(const TensorPtr& lhs, const TensorPtr& rhs){
                     }
                     if (rhs->requires_grad) {
                         launch_binary_backward_broadcast(
-                            rhs->cuda_grad,
-                            out_ptr->cuda_grad,
-                            lhs->cuda_data,
-                            rhs->cuda_data,
+                            rhs->cuda_grad.get(),
+                            out_ptr->cuda_grad.get(),
+                            lhs->cuda_data.get(),
+                            rhs->cuda_data.get(),
                             total_elements,
                             meta,
                             false,
@@ -2477,10 +2473,10 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
             CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
                         N, M, K,
                         &alpha,
-                        rhs->cuda_data + batch_rhs_off, N,
-                        lhs->cuda_data + batch_lhs_off, K,
+                        rhs->cuda_data.get() + batch_rhs_off, N,
+                        lhs->cuda_data.get() + batch_lhs_off, K,
                         &beta,
-                        out->cuda_data + batch_out_off, N));
+                        out->cuda_data.get() + batch_out_off, N));
         }
     } else { //CPU forward pass
         const double* lhs_ptr = lhs->data->data();
@@ -2544,10 +2540,10 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
                         CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
                                     K, M, N,
                                     &alpha,
-                                    rhs->cuda_data + batch_rhs_off, N,
-                                    out_ptr->cuda_grad + batch_out_off, N,
+                                    rhs->cuda_data.get() + batch_rhs_off, N,
+                                    out_ptr->cuda_grad.get() + batch_out_off, N,
                                     &beta,
-                                    lhs->cuda_grad + batch_lhs_off, K));
+                                    lhs->cuda_grad.get() + batch_lhs_off, K));
                     }
 
                     // dL/dRHS = LHS^T * dL/dOut
@@ -2555,10 +2551,10 @@ TensorPtr Tensor::matmul(const TensorPtr& lhs, const TensorPtr& rhs){
                         CUBLAS_CHECK(cublasDgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
                                     N, K, M,
                                     &alpha,
-                                    out_ptr->cuda_grad + batch_out_off, N,
-                                    lhs->cuda_data + batch_lhs_off, K,
+                                    out_ptr->cuda_grad.get() + batch_out_off, N,
+                                    lhs->cuda_data.get() + batch_lhs_off, K,
                                     &beta,
-                                    rhs->cuda_grad + batch_rhs_off, N));
+                                    rhs->cuda_grad.get() + batch_rhs_off, N));
                     }
                     Tensor::advance_coordinates(back_batch_idx, batch_shape);
                 }
@@ -2660,8 +2656,8 @@ TensorPtr Tensor::relu(){
     if(active_this->device == Device::CUDA){
         // --- gpu forward pass
         launch_unary_forward(
-            active_this->cuda_data, 
-            out->cuda_data, 
+            active_this->cuda_data.get(), 
+            out->cuda_data.get(), 
             total_elements, 
             reluForwardOp()
         );
@@ -2689,9 +2685,9 @@ TensorPtr Tensor::relu(){
                 // GPU backward pass
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad, 
-                        self->cuda_grad, 
-                        self->cuda_data, 
+                        out_ptr->cuda_grad.get(), 
+                        self->cuda_grad.get(), 
+                        self->cuda_data.get(), 
                         total_elements, 
                         reluBackwardOp()
                     );
@@ -2726,8 +2722,8 @@ TensorPtr Tensor::exp(){
     if(active_this->device == Device::CUDA){
         // --- gpu forward pass
         launch_unary_forward(
-            active_this->cuda_data, 
-            out->cuda_data, 
+            active_this->cuda_data.get(), 
+            out->cuda_data.get(), 
             total_elements, 
             expForwardOp()
         );
@@ -2756,9 +2752,9 @@ TensorPtr Tensor::exp(){
                 // -- gpu
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad, 
-                        self->cuda_grad, 
-                        self->cuda_data, 
+                        out_ptr->cuda_grad.get(), 
+                        self->cuda_grad.get(), 
+                        self->cuda_data.get(), 
                         total_elements, 
                         expBackwardOp()
                     );
@@ -2794,8 +2790,8 @@ TensorPtr Tensor::tanh(){
     if(active_this->device == Device::CUDA){
         // --- gpu
         launch_unary_forward(
-            active_this->cuda_data, 
-            out->cuda_data, 
+            active_this->cuda_data.get(), 
+            out->cuda_data.get(), 
             total_elements, 
             tanhForwardOp()
         );
@@ -2824,9 +2820,9 @@ TensorPtr Tensor::tanh(){
                 // gpu backward
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad, 
-                        self->cuda_grad, 
-                        self->cuda_data, 
+                        out_ptr->cuda_grad.get(), 
+                        self->cuda_grad.get(), 
+                        self->cuda_data.get(), 
                         total_elements, 
                         tanhBackwardOp()
                     );
@@ -2863,8 +2859,8 @@ TensorPtr Tensor::sigmoid(){
     if(active_this->device == Device::CUDA){
         // --- gpu forward pass
         launch_unary_forward(
-            active_this->cuda_data, 
-            out->cuda_data, 
+            active_this->cuda_data.get(), 
+            out->cuda_data.get(), 
             total_elements, 
             sigmoidForwardOp()
         );
@@ -2893,9 +2889,9 @@ TensorPtr Tensor::sigmoid(){
                 // GPU backward pass
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad, 
-                        self->cuda_grad, 
-                        self->cuda_data, 
+                        out_ptr->cuda_grad.get(), 
+                        self->cuda_grad.get(), 
+                        self->cuda_data.get(), 
                         total_elements, 
                         sigmoidBackwardOp()
                     );
@@ -2930,8 +2926,8 @@ TensorPtr Tensor::log(){
     if(active_this->device == Device::CUDA){
         // --- gpu forward pass
         launch_unary_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             total_elements,
             logForwardOp()
         );
@@ -2960,9 +2956,9 @@ TensorPtr Tensor::log(){
                 // GPU backward pass
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
-                        self->cuda_data,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
+                        self->cuda_data.get(),
                         total_elements,
                         logBackwardOp()
                     );
@@ -2997,8 +2993,8 @@ TensorPtr Tensor::pow(double exponent){
     if(active_this->device == Device::CUDA){
         // gpu forward
         launch_unary_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             total_elements,
             powForwardOp(exponent)
         );
@@ -3028,9 +3024,9 @@ TensorPtr Tensor::pow(double exponent){
                 // gpu backward pass
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
-                        self->cuda_data,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
+                        self->cuda_data.get(),
                         total_elements,
                         powBackwardOp(exponent)
                     );
@@ -3063,8 +3059,8 @@ TensorPtr Tensor::sqrt(){
     if(active_this->device == Device::CUDA){
         // --- gpu forward pass
         launch_unary_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             total_elements,
             sqrtForwardOp()
         );
@@ -3095,9 +3091,9 @@ TensorPtr Tensor::sqrt(){
 
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
-                        self->cuda_data,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
+                        self->cuda_data.get(),
                         total_elements,
                         sqrtBackwardOp()
                     );
@@ -3134,8 +3130,8 @@ TensorPtr Tensor::neg(){
     if(active_this->device == Device::CUDA){
         // --- gpu
         launch_unary_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             total_elements,
             negForwardOp()
         );
@@ -3164,9 +3160,9 @@ TensorPtr Tensor::neg(){
                 // --- gpu
                 if(self->device == Device::CUDA){
                     launch_unary_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
-                        self->cuda_data,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
+                        self->cuda_data.get(),
                         total_elements,
                         negBackwardOp()
                     );
@@ -3219,7 +3215,7 @@ TensorPtr Tensor::softmax(size_t dim) {
     auto out = std::make_shared<Tensor>(std::move(dummy_vals), active_this->shape, std::vector<TensorPtr>{active_this}, "softmax");
     out->to(active_this->device);
 
-    launch_softmax_forward(active_this->cuda_data, out->cuda_data, meta);
+    launch_softmax_forward(active_this->cuda_data.get(), out->cuda_data.get(), meta);
 
     std::weak_ptr<Tensor> weak_out = out;
     auto self = active_this;
@@ -3229,7 +3225,7 @@ TensorPtr Tensor::softmax(size_t dim) {
             if (self->requires_grad) {
                 if (self->device == Device::CUDA) {
                     launch_softmax_backward(
-                        out_ptr->cuda_grad, out_ptr->cuda_data, self->cuda_grad, meta
+                        out_ptr->cuda_grad.get(), out_ptr->cuda_data.get(), self->cuda_grad.get(), meta
                     );
                 }
             }
@@ -3257,7 +3253,7 @@ TensorPtr Tensor::log_softmax(size_t dim) {
     auto out = std::make_shared<Tensor>(std::move(dummy_vals), active_this->shape, std::vector<TensorPtr>{active_this}, "log_softmax");
     out->to(active_this->device);
 
-    launch_log_softmax_forward(active_this->cuda_data, out->cuda_data, meta);
+    launch_log_softmax_forward(active_this->cuda_data.get(), out->cuda_data.get(), meta);
 
     std::weak_ptr<Tensor> weak_out = out;
     auto self = active_this;
@@ -3267,7 +3263,7 @@ TensorPtr Tensor::log_softmax(size_t dim) {
             if (self->requires_grad) {
                 if (self->device == Device::CUDA) {
                     launch_log_softmax_backward(
-                        out_ptr->cuda_grad, out_ptr->cuda_data, self->cuda_grad, meta
+                        out_ptr->cuda_grad.get(), out_ptr->cuda_data.get(), self->cuda_grad.get(), meta
                     );
                 }
             }
@@ -3299,8 +3295,8 @@ TensorPtr Tensor::sum(size_t dim, bool keepdim){
     // forward pass
     if(active_this->device == Device::CUDA){
         launch_reduction_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             meta,
             sumForwardOp()
         );
@@ -3349,8 +3345,8 @@ TensorPtr Tensor::sum(size_t dim, bool keepdim){
 
                 if(self->device == Device::CUDA){
                     launch_reduction_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
                         meta.reduced_size,
                         meta.inner_block_size,
                         total_in,
@@ -3408,12 +3404,12 @@ TensorPtr Tensor::sum() {
         // compute full reduction using parallel thrust::reduce
         double total_sum = thrust::reduce(
             thrust::device,
-            active_this->cuda_data,
-            active_this->cuda_data + total_elements,
+            active_this->cuda_data.get(),
+            active_this->cuda_data.get() + total_elements,
             0.0,
             thrust::plus<double>()
         );
-        CUDA_CHECK(cudaMemcpy(out->cuda_data, &total_sum, sizeof(double), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(out->cuda_data.get(), &total_sum, sizeof(double), cudaMemcpyHostToDevice));
     } else {
         double sum_val = 0.0;
         const double* in_ptr = active_this->data->data();
@@ -3432,8 +3428,8 @@ TensorPtr Tensor::sum() {
             if (self->requires_grad) {
                 if (self->device == Device::CUDA) {
                     launch_reduction_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
                         total_elements,
                         1,
                         total_elements,
@@ -3466,15 +3462,15 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
     if(active_this->device == Device::CUDA){
         // reduce sum along target dim
         launch_reduction_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             meta,
             sumForwardOp()
         );
         // divide by reduced_size
         launch_unary_forward(
-            out->cuda_data,
-            out->cuda_data,
+            out->cuda_data.get(),
+            out->cuda_data.get(),
             meta.total_out_elements,
             mulScalarForwardOp(1.0 / static_cast<double>(meta.reduced_size))
         );
@@ -3522,8 +3518,8 @@ TensorPtr Tensor::mean(size_t dim, bool keepdim){
 
                 if (self->device == Device::CUDA) {
                     launch_reduction_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
                         meta.reduced_size,
                         meta.inner_block_size,
                         total_in,
@@ -3586,8 +3582,8 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
     // --- forward pass
     if(active_this->device == Device::CUDA){
         launch_reduction_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             meta,
             maxReduceOp()
         );
@@ -3642,12 +3638,12 @@ TensorPtr Tensor::max(size_t dim, bool keepdim){
                 
                 if(self->device == Device::CUDA){
                     launch_reduction_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
                         meta.reduced_size,
                         meta.inner_block_size,
                         total_in,
-                        maxBackwardOp(self->cuda_data, out_ptr->cuda_data)
+                        maxBackwardOp(self->cuda_data.get(), out_ptr->cuda_data.get())
                     );
                 } else {
                     for (size_t i {0}; i < total_out_elements; ++i) {
@@ -3677,8 +3673,8 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
     // forward pass
     if(active_this->device == Device::CUDA){
         launch_reduction_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             meta,
             minReduceOp()
         );
@@ -3732,12 +3728,12 @@ TensorPtr Tensor::min(size_t dim, bool keepdim){
 
                 if(self->device == Device::CUDA){
                     launch_reduction_backward(
-                        out_ptr->cuda_grad,
-                        self->cuda_grad,
+                        out_ptr->cuda_grad.get(),
+                        self->cuda_grad.get(),
                         meta.reduced_size,
                         meta.inner_block_size,
                         total_in,
-                        minBackwardOp(self->cuda_data, out_ptr->cuda_data)
+                        minBackwardOp(self->cuda_data.get(), out_ptr->cuda_data.get())
                     );
                 } else {
                     for (size_t i {0}; i < total_out_elements; ++i) {
@@ -3766,8 +3762,8 @@ TensorPtr Tensor::argmax(size_t dim, bool keepdim) {
     // --- forward pass
     if(active_this->device == Device::CUDA){
         launch_arg_reduction_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             meta,
             -INFINITY,
             argmaxCompareOp()
@@ -3823,8 +3819,8 @@ TensorPtr Tensor::argmin(size_t dim, bool keepdim) {
     // forward pass
     if(active_this->device == Device::CUDA){
         launch_arg_reduction_forward(
-            active_this->cuda_data,
-            out->cuda_data,
+            active_this->cuda_data.get(),
+            out->cuda_data.get(),
             meta,
             INFINITY,
             argminCompareOp()
@@ -4026,18 +4022,18 @@ TensorPtr operator==(const Tensor& lhs, const Tensor& rhs) {
         // --- gpu execution
         if(is_matching_shape){
             launch_binary_forward(
-                lhs.cuda_data,
-                rhs.cuda_data,
-                out->cuda_data,
+                lhs.cuda_data.get(),
+                rhs.cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 eqForwardOp()
             );
         } else {
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                lhs.cuda_data,
-                rhs.cuda_data,
-                out->cuda_data,
+                lhs.cuda_data.get(),
+                rhs.cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 meta,
                 eqForwardOp()
@@ -4094,18 +4090,18 @@ TensorPtr operator<(const Tensor& lhs, const Tensor& rhs) {
         // --- gpu exec
         if(is_matching_shape){
             launch_binary_forward(
-                lhs.cuda_data,
-                rhs.cuda_data,
-                out->cuda_data,
+                lhs.cuda_data.get(),
+                rhs.cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 ltForwardOp()
             );
         } else {
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                lhs.cuda_data,
-                rhs.cuda_data,
-                out->cuda_data,
+                lhs.cuda_data.get(),
+                rhs.cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 meta,
                 ltForwardOp()
@@ -4161,18 +4157,18 @@ TensorPtr operator>(const Tensor& lhs, const Tensor& rhs) {
     if(active_device == Device::CUDA){
         if(is_matching_shape){
             launch_binary_forward(
-                lhs.cuda_data,
-                rhs.cuda_data,
-                out->cuda_data,
+                lhs.cuda_data.get(),
+                rhs.cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 gtForwardOp()
             );
         } else {
             BroadcastMeta meta = create_broadcast_meta(out_shape, lhs_b_strides, rhs_b_strides);
             launch_binary_forward_broadcast(
-                lhs.cuda_data,
-                rhs.cuda_data,
-                out->cuda_data,
+                lhs.cuda_data.get(),
+                rhs.cuda_data.get(),
+                out->cuda_data.get(),
                 total_elements,
                 meta,
                 gtForwardOp()
@@ -4315,7 +4311,7 @@ TensorPtr Tensor::argsort(size_t dim, bool descending) {
         for (size_t outer = 0; outer < outer_block_size; ++outer) {
             for (size_t inner = 0; inner < inner_block_size; ++inner) {
                 gather_slice_kernel<<<blocks_slice, threads_slice>>>(
-                    active_this->cuda_data,
+                    active_this->cuda_data.get(),
                     thrust::raw_pointer_cast(d_keys.data()),
                     outer, inner, reduced_size, inner_block_size
                 );
@@ -4343,7 +4339,7 @@ TensorPtr Tensor::argsort(size_t dim, bool descending) {
 
                 scatter_slice_kernel<<<blocks_slice, threads_slice>>>(
                     thrust::raw_pointer_cast(d_indices.data()),
-                    out->cuda_data,
+                    out->cuda_data.get(),
                     outer, inner, reduced_size, inner_block_size
                 );
                 CUDA_CHECK(cudaGetLastError());
@@ -4406,13 +4402,14 @@ void Tensor::backward() {
     std::vector<std::pair<TensorPtr, std::vector<double>>> saved_intermediate_grads;
 
     for (auto& node : topo) {
-        if (node->requires_grad && !node->prev.empty() && node != shared_from_this() && !node->is_view) {
+        bool is_shared_view = (!node->prev.empty() && node->prev[0] != nullptr && node->grad == node->prev[0]->grad);
+        if (node->requires_grad && !node->prev.empty() && node != shared_from_this() && !is_shared_view) {
             if (node->device == Device::CPU && node->grad) {
                 saved_intermediate_grads.emplace_back(node, *(node->grad));
                 std::fill(node->grad->begin(), node->grad->end(), 0.0);
             } else if (node->device == Device::CUDA && node->cuda_grad != nullptr) {
                 size_t bytes = node->data->size() * sizeof(double);
-                CUDA_CHECK(cudaMemset(node->cuda_grad, 0, bytes));
+                CUDA_CHECK(cudaMemset(node->cuda_grad.get(), 0, bytes));
             }
         }
     }
@@ -4420,9 +4417,9 @@ void Tensor::backward() {
     // out node start with grad 1.0
     this->ensure_grad_allocated();
     std::fill(grad->begin(), grad->end(), 1.0);
-    if(this->device == Device::CUDA && this->cuda_grad != nullptr){
+    if (this->device == Device::CUDA && this->cuda_grad != nullptr) {
         CUDA_CHECK(cudaMemcpy(
-            this->cuda_grad,
+            this->cuda_grad.get(),
             this->grad->data(),
             this->grad->size() * sizeof(double),
             cudaMemcpyHostToDevice

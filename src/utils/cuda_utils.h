@@ -44,6 +44,15 @@ namespace cuda_utils {
     inline int ceil_div(int a, int b) { 
         return (a + b - 1) / b; 
     }
+
+    // safely invokes cudaFree when the last reference drops
+    struct CudaDeleter{
+        void operator()(double* ptr) const {
+            if(ptr){
+                cudaFree(ptr);
+            }
+        }
+    };
 }
 
 #endif
