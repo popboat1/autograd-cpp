@@ -18,12 +18,12 @@ struct CudaTimer {
     std::chrono::high_resolution_clock::time_point start_time;
 
     void start() {
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaDeviceSynchronize());
         start_time = std::chrono::high_resolution_clock::now();
     }
 
     double stop_ms() {
-        cudaDeviceSynchronize();
+        CHECK_CUDA(cudaDeviceSynchronize());
         auto end_time = std::chrono::high_resolution_clock::now();
         return std::chrono::duration<double, std::milli>(end_time - start_time).count();
     }
@@ -72,8 +72,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] relu cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -100,8 +100,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] exp cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -128,8 +128,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] tanh cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -156,8 +156,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] sigmoid cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -184,8 +184,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] log cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -212,8 +212,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] pow cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -240,8 +240,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] sqrt cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -268,8 +268,8 @@ int main() {
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] neg cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -308,9 +308,9 @@ int main() {
         a_gpu->to(Device::CPU);
         b_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
-            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
         }
         std::cout << "[PASS] operator+ cuda fast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -347,11 +347,11 @@ int main() {
         a_gpu->to(Device::CPU);
         b_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
         }
         for (size_t i = 0; i < b_elements; ++i) {
-            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
         }
         std::cout << "[PASS] operator+ cuda broadcast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -385,9 +385,9 @@ int main() {
         a_gpu->to(Device::CPU);
         b_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
-            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
         }
         std::cout << "[PASS] operator- cuda fast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -424,11 +424,11 @@ int main() {
         a_gpu->to(Device::CPU);
         b_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
         }
         for (size_t i = 0; i < b_elements; ++i) {
-            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
         }
         std::cout << "[PASS] operator- cuda broadcast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -462,9 +462,9 @@ int main() {
         a_gpu->to(Device::CPU);
         b_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
-            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
         }
         std::cout << "[PASS] operator* cuda fast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -501,11 +501,11 @@ int main() {
         a_gpu->to(Device::CPU);
         b_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
         }
         for (size_t i = 0; i < b_elements; ++i) {
-            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
         }
         std::cout << "[PASS] operator* cuda broadcast path verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -532,8 +532,8 @@ int main() {
         out_gpu->to(Device::CPU);
         a_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
         }
         std::cout << "[PASS] tensor * scalar cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -560,8 +560,8 @@ int main() {
         out_gpu->to(Device::CPU);
         a_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
         }
         std::cout << "[PASS] scalar * tensor cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -595,9 +595,9 @@ int main() {
         a_gpu->to(Device::CPU);
         b_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
-            assert(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->grad)[i], (*a_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*b_gpu->grad)[i], (*b_cpu->grad)[i]));
         }
         std::cout << "[PASS] operator/ cuda pass verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -622,7 +622,7 @@ int main() {
 
         a_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*a_gpu->data)[i], (*a_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->data)[i], (*a_cpu->data)[i]));
         }
         std::cout << "[PASS] in-place add_ cuda pass verified (exec: " << fwd_time << " ms)\n";
     }
@@ -649,7 +649,7 @@ int main() {
 
         a_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*a_gpu->data)[i], (*a_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*a_gpu->data)[i], (*a_cpu->data)[i]));
         }
         std::cout << "[PASS] in-place sub_ cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
@@ -676,7 +676,7 @@ int main() {
 
         out_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] operator== cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
@@ -703,7 +703,7 @@ int main() {
 
         out_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] operator< cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
@@ -730,7 +730,7 @@ int main() {
 
         out_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] operator> cuda broadcast pass verified (exec: " << fwd_time << " ms)\n";
     }
@@ -761,12 +761,12 @@ int main() {
 
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < out_cpu->data->size(); ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] sum(dim=2) [collapsing H] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -792,9 +792,9 @@ int main() {
 
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(close_enough((*out_gpu->data)[0], (*out_cpu->data)[0]));
+        CHECK_TENSOR(close_enough((*out_gpu->data)[0], (*out_cpu->data)[0]));
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] full sum() [collapsing all dims] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -820,12 +820,12 @@ int main() {
 
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < out_cpu->data->size(); ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] mean(dim=1) [collapsing C] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -851,12 +851,12 @@ int main() {
 
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < out_cpu->data->size(); ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] max(dim=3) [collapsing W] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -882,12 +882,12 @@ int main() {
 
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < out_cpu->data->size(); ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] min(dim=0) [collapsing B] verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -906,9 +906,9 @@ int main() {
         double fwd_time = timer.stop_ms();
 
         out_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < out_cpu->data->size(); ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] argmax(dim=3) [index along W] verified (fwd: " << fwd_time << " ms)\n";
     }
@@ -927,9 +927,9 @@ int main() {
         double fwd_time = timer.stop_ms();
 
         out_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < out_cpu->data->size(); ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] argmin(dim=2) [index along H] verified (fwd: " << fwd_time << " ms)\n";
     }
@@ -958,10 +958,10 @@ int main() {
         // Parity Verification
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] softmax(dim=3) verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -990,10 +990,10 @@ int main() {
         // arity Verification
         out_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] log_softmax(dim=2) verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -1024,12 +1024,12 @@ int main() {
         // Parity Verification
         cont_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(cont_gpu->shape == cont_cpu->shape);
-        assert(cont_gpu->is_contiguous() == true);
+        CHECK_TENSOR(cont_gpu->shape == cont_cpu->shape);
+        CHECK_TENSOR(cont_gpu->is_contiguous() == true);
         
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*cont_gpu->data)[i], (*cont_cpu->data)[i]));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
+            CHECK_TENSOR(close_enough((*cont_gpu->data)[i], (*cont_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i]));
         }
         std::cout << "[PASS] contiguous() on transposed view verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -1051,11 +1051,11 @@ int main() {
 
         // Parity Verification
         out_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
-        assert(out_gpu->requires_grad == false);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->requires_grad == false);
 
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] argsort(dim=3) verified (fwd: " << fwd_time << " ms)\n";
     }
@@ -1082,8 +1082,8 @@ int main() {
         sm_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*sm_gpu->data)[i], (*sm_cpu->data)[i], 1e-4));
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-4));
+            CHECK_TENSOR(close_enough((*sm_gpu->data)[i], (*sm_cpu->data)[i], 1e-4));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-4));
         }
         std::cout << "[PASS] softmax(dim=1) CPU/GPU autograd parity verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
@@ -1110,10 +1110,10 @@ int main() {
 
         sum_gpu->to(Device::CPU);
         x_gpu->to(Device::CPU);
-        assert(close_enough((*sum_gpu->data)[0], 1500000.0, 1e-3));
-        assert(close_enough((*sum_gpu->data)[0], (*sum_cpu->data)[0], 1e-3));
-        assert(close_enough((*x_gpu->grad)[0], (*x_cpu->grad)[0], 1e-4));
-        assert(close_enough((*x_gpu->grad)[large_elements - 1], (*x_cpu->grad)[large_elements - 1], 1e-4));
+        CHECK_TENSOR(close_enough((*sum_gpu->data)[0], 1500000.0, 1e-3));
+        CHECK_TENSOR(close_enough((*sum_gpu->data)[0], (*sum_cpu->data)[0], 1e-3));
+        CHECK_TENSOR(close_enough((*x_gpu->grad)[0], (*x_cpu->grad)[0], 1e-4));
+        CHECK_TENSOR(close_enough((*x_gpu->grad)[large_elements - 1], (*x_cpu->grad)[large_elements - 1], 1e-4));
         std::cout << "[PASS] large-tensor global sum (1M elements) verified (fwd: " << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
@@ -1131,9 +1131,9 @@ int main() {
         double fwd_time = timer.stop_ms();
 
         out_gpu->to(Device::CPU);
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < num_elements; ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i]));
         }
         std::cout << "[PASS] argsort(dim=1, descending=true) strided GPU verified (fwd: " << fwd_time << " ms)\n";
     }
@@ -1180,24 +1180,24 @@ int main() {
         conv_gpu->bias->to(Device::CPU);
 
         // Verify forward output activations
-        assert(out_gpu->shape == out_cpu->shape);
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
         for (size_t i = 0; i < out_cpu->data->size(); ++i) {
-            assert(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i], 1e-3));
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i], 1e-3));
         }
 
         // Verify col2im input image gradient routing
         for (size_t i = 0; i < total_in; ++i) {
-            assert(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-3));
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-3));
         }
 
         // Verify filter weight gradients
         for (size_t i = 0; i < conv_cpu->weight->data->size(); ++i) {
-            assert(close_enough((*conv_gpu->weight->grad)[i], (*conv_cpu->weight->grad)[i], 1e-3));
+            CHECK_TENSOR(close_enough((*conv_gpu->weight->grad)[i], (*conv_cpu->weight->grad)[i], 1e-3));
         }
 
         // Verify channel bias gradients
         for (size_t i = 0; i < conv_cpu->bias->data->size(); ++i) {
-            assert(close_enough((*conv_gpu->bias->grad)[i], (*conv_cpu->bias->grad)[i], 1e-3));
+            CHECK_TENSOR(close_enough((*conv_gpu->bias->grad)[i], (*conv_cpu->bias->grad)[i], 1e-3));
         }
 
         std::cout << "[PASS] Conv2D forward (im2col) & backward (col2im) CPU/GPU parity verified (fwd: " 
