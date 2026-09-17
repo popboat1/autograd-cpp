@@ -60,7 +60,7 @@ __global__ void d_maxpool2d_fwd(
     max_indices[idx] = winning_src_idx;
 }
 
-__global__ void d_maxpool2d_bckwrd(
+__global__ void d_maxpool2d_bwd(
     const double* __restrict__ upstream_grad,
     double* __restrict__ input_grad,
     const size_t* __restrict__ max_indices,
@@ -102,7 +102,7 @@ inline void launch_maxpool2d_backward(
 ) {
     constexpr int block_threads = 256;
     int blocks = cuda_utils::ceil_div(static_cast<int>(total_out), block_threads);
-    d_maxpool2d_bckwrd<<<blocks, block_threads>>>(
+    d_maxpool2d_bwd<<<blocks, block_threads>>>(
         d_upstream_grad, d_input_grad, d_max_indices, total_out
     );
     CUDA_CHECK(cudaGetLastError());
