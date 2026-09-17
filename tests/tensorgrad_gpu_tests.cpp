@@ -7,6 +7,7 @@
 #include "test_utils.h"
 #include "autograd/Tensor.h"
 #include "nn/Conv2D.h"
+#include "nn/MaxPool2D.h"
 
 // helper to assert floating point parity smoothly
 bool close_enough(double a, double b, double tol = 1e-4) {
@@ -1201,6 +1202,54 @@ int main() {
         }
 
         std::cout << "[PASS] Conv2D forward (im2col) & backward (col2im) CPU/GPU parity verified (fwd: " 
+                  << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // test 38: MaxPool2D forward and backward CPU vs GPU parity
+    {
+        // Batch=2, Channels=3, Height=8, Width=8, Kernel=2, Stride=2
+        const size_t B = 2, C = 3, H = 8, W = 8;
+        const size_t K = 2, stride = 2;
+        const size_t total_in = B * C * H * W;
+
+        auto in_raw = generate_4d_data(total_in, 1.0, 0.5);
+        auto x_cpu = std::make_shared<Tensor>(in_raw, std::vector<size_t>{B, C, H, W}, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(in_raw, std::vector<size_t>{B, C, H, W}, true, Device::CPU);
+
+        auto pool_cpu = std::make_shared<MaxPool2D>(K, stride);
+        auto pool_gpu = std::make_shared<MaxPool2D>(K, stride);
+
+        // CPU pass
+        auto out_cpu = pool_cpu->forward(x_cpu);
+        auto loss_cpu = out_cpu->sum();
+        x_cpu->ensure_grad_allocated();
+        loss_cpu->backward();
+
+        // GPU pass
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = pool_gpu->forward(x_gpu);
+        double fwd_time = timer.stop_ms();
+
+        auto loss_gpu = out_gpu->sum();
+        timer.start();
+        loss_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        // Transfer back for verification
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < out_cpu->data->size(); ++i) {
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i], 1e-4));
+        }
+
+        for (size_t i = 0; i < total_in; ++i) {
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-4));
+        }
+
+        std::cout << "[PASS] MaxPool2D forward & backward CPU/GPU autograd parity verified (fwd: "
                   << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
