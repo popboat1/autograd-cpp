@@ -9,6 +9,7 @@
 #include "nn/Conv2D.h"
 #include "nn/MaxPool2D.h"
 #include "nn/AvgPool2D.h"
+#include "nn/Loss.h"
 
 // helper to assert floating point parity smoothly
 bool close_enough(double a, double b, double tol = 1e-4) {
@@ -1348,6 +1349,61 @@ int main() {
         CHECK_TENSOR(caught_avg_underflow);
 
         std::cout << "[PASS] MaxPool2D & AvgPool2D 4D rank guards & underflow checks verified\n";
+    }
+
+        // test 41: GPU-native SparseCategoricalCrossEntropy forward and backward parity
+    {
+        // Batch=2, Classes=3
+        std::vector<double> scce_logits = {
+            1.0, 2.0, 3.0,   // sample 0 logits
+            1.0, 5.0, 1.0    // sample 1 logits
+        };
+        std::vector<double> scce_targets = {2.0, 1.0}; // sample 0 -> class 2, sample 1 -> class 1
+
+        auto logits_cpu = std::make_shared<Tensor>(scce_logits, std::vector<size_t>{2, 3}, true, Device::CPU);
+        auto targets_cpu = std::make_shared<Tensor>(scce_targets, std::vector<size_t>{2}, false, Device::CPU);
+
+        auto logits_gpu = std::make_shared<Tensor>(scce_logits, std::vector<size_t>{2, 3}, true, Device::CUDA);
+        auto targets_gpu = std::make_shared<Tensor>(scce_targets, std::vector<size_t>{2}, false, Device::CUDA);
+
+        SparseCategoricalCrossEntropyLoss criterion;
+
+        // CPU pass
+        auto loss_cpu = criterion(logits_cpu, targets_cpu);
+        logits_cpu->ensure_grad_allocated();
+        loss_cpu->backward();
+
+        // GPU pass with timing
+        timer.start();
+        auto loss_gpu = criterion(logits_gpu, targets_gpu);
+        double fwd_time = timer.stop_ms();
+
+        logits_gpu->ensure_grad_allocated();
+        timer.start();
+        loss_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        // Transfer GPU results back for parity check
+        loss_gpu->to(Device::CPU);
+        logits_gpu->to(Device::CPU);
+
+        // Analytical baseline check: loss ~ 0.221791
+        CHECK_TENSOR(close_enough((*loss_gpu->data)[0], (*loss_cpu->data)[0], 1e-4));
+        CHECK_TENSOR(close_enough((*loss_gpu->data)[0], 0.22179113, 1e-4));
+
+        // Gradients check on logits:
+        // sample 0, class 2: (prob - 1) / N = -0.16737953
+        CHECK_TENSOR(close_enough((*logits_gpu->grad)[2], (*logits_cpu->grad)[2], 1e-4));
+        // sample 1, class 1: (prob - 1) / N = -0.01766872
+        CHECK_TENSOR(close_enough((*logits_gpu->grad)[4], (*logits_cpu->grad)[4], 1e-4));
+
+        // Full gradient tensor parity across all classes
+        for (size_t i = 0; i < logits_cpu->data->size(); ++i) {
+            CHECK_TENSOR(close_enough((*logits_gpu->grad)[i], (*logits_cpu->grad)[i], 1e-4));
+        }
+
+        std::cout << "[PASS] GPU-native SparseCategoricalCrossEntropy forward & backward verified (fwd: "
+                  << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
     std::cout << "==========================================\n";

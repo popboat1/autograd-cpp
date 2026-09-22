@@ -68,7 +68,7 @@ add_library(autograd_core STATIC
     src/nn/MLP.cpp
     src/optim/SGD.cpp
     src/optim/Adam.cpp
-    src/nn/Loss.cpp
+    src/nn/Loss.cu
     src/nn/Conv2D.cu
     src/nn/MaxPool2D.cu
     src/nn/AvgPool2D.cu
