@@ -115,11 +115,24 @@ inline void launch_maxpool2d_backward(
 TensorPtr MaxPool2D::forward(const TensorPtr& input) {
     auto x = input->is_contiguous() ? input : input->contiguous();
 
+    // guard 4D rank
+    if (x->shape.size() != 4) {
+        throw std::invalid_argument("MaxPool2D: input tensor must be 4D [B, C, H, W], but got rank " + std::to_string(x->shape.size()));
+    }
+
     // unpack dims
     size_t batch_size = x->shape[0];
     size_t in_c = x->shape[1];
     size_t in_h = x->shape[2];
     size_t in_w = x->shape[3];
+
+    // guard against unsigned underflow (image must be >= kernel size)
+    if (in_h < kernel_size || in_w < kernel_size) {
+        throw std::invalid_argument(
+            "MaxPool2D: input spatial dimensions (" + std::to_string(in_h) + "x" + std::to_string(in_w) +
+            ") must be >= kernel_size (" + std::to_string(kernel_size) + ")"
+        );
+    }
 
     // calculate output map boundaries
     size_t out_h = ((in_h - kernel_size) / stride) + 1;

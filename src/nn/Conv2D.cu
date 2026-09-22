@@ -299,15 +299,35 @@ TensorPtr Conv2D::forward(const TensorPtr& input){
     if (weight->device != x->device) weight->to(x->device);
     if (bias->device != x->device) bias->to(x->device);
 
+    // guard 4D rank
+    if (x->shape.size() != 4) {
+        throw std::invalid_argument("Conv2D: input tensor must be 4D [B, C, H, W], but got rank " + std::to_string(x->shape.size()));
+    }
+
     // unpack dimensions
     size_t batch_size = x->shape[0];
     size_t in_c = x->shape[1];
     size_t in_h = x->shape[2];
     size_t in_w = x->shape[3];
 
+    // channel guard
+    if (in_c != in_channels) {
+        throw std::invalid_argument("Conv2D: input channel mismatch, expected " + 
+            std::to_string(in_channels) + " but received " + std::to_string(in_c));
+    }
+
+    // spatial underflow guard (with padding)
+    size_t effective_h = in_h + 2 * padding;
+    size_t effective_w = in_w + 2 * padding;
+    if (effective_h < kernel_size || effective_w < kernel_size) {
+        throw std::invalid_argument("Conv2D: padded input dimensions (" + 
+            std::to_string(effective_h) + "x" + std::to_string(effective_w) + 
+            ") must be >= kernel_size (" + std::to_string(kernel_size) + ")");
+    }
+
     // calculate output spatial boundary maps
-    size_t out_h = ((in_h - kernel_size + 2 * padding) / stride) + 1;
-    size_t out_w = ((in_w - kernel_size + 2 * padding) / stride) + 1;
+    size_t out_h = ((effective_h - kernel_size) / stride) + 1;
+    size_t out_w = ((effective_w - kernel_size) / stride) + 1;
 
     // package unrolled parameters into a tracking graph node
     size_t col_rows = batch_size * out_h * out_w;

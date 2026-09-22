@@ -1302,6 +1302,54 @@ int main() {
                   << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
+        // test 40: MaxPool2D and AvgPool2D rank and underflow bounds guards
+    {
+        auto max_pool = std::make_shared<MaxPool2D>(3, 1);
+        auto avg_pool = std::make_shared<AvgPool2D>(3, 1);
+
+        // 1. Test invalid rank (2D tensor instead of 4D)
+        auto invalid_2d = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0, 4.0}, std::vector<size_t>{2, 2}, false, Device::CPU);
+        bool caught_max_rank = false;
+        bool caught_avg_rank = false;
+
+        try {
+            max_pool->forward(invalid_2d);
+        } catch (const std::invalid_argument&) {
+            caught_max_rank = true;
+        }
+
+        try {
+            avg_pool->forward(invalid_2d);
+        } catch (const std::invalid_argument&) {
+            caught_avg_rank = true;
+        }
+
+        CHECK_TENSOR(caught_max_rank);
+        CHECK_TENSOR(caught_avg_rank);
+
+        // 2. Test underflow hazard (image 2x2 with kernel 3x3)
+        auto small_img = std::make_shared<Tensor>(std::vector<double>(4, 1.0), std::vector<size_t>{1, 1, 2, 2}, false, Device::CUDA);
+        bool caught_max_underflow = false;
+        bool caught_avg_underflow = false;
+
+        try {
+            max_pool->forward(small_img);
+        } catch (const std::invalid_argument&) {
+            caught_max_underflow = true;
+        }
+
+        try {
+            avg_pool->forward(small_img);
+        } catch (const std::invalid_argument&) {
+            caught_avg_underflow = true;
+        }
+
+        CHECK_TENSOR(caught_max_underflow);
+        CHECK_TENSOR(caught_avg_underflow);
+
+        std::cout << "[PASS] MaxPool2D & AvgPool2D 4D rank guards & underflow checks verified\n";
+    }
+
     std::cout << "==========================================\n";
     std::cout << "[PASS] all GPU tests and latency benchmarks verified cleanly!\n";
     std::cout << "==========================================\n";
