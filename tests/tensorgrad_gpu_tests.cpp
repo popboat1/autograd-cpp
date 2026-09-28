@@ -11,6 +11,8 @@
 #include "nn/AvgPool2D.h"
 #include "nn/Loss.h"
 #include "nn/BatchNorm2D.h"
+#include "optim/SGD.h"
+#include "optim/Adam.h"
 
 // helper to assert floating point parity smoothly
 bool close_enough(double a, double b, double tol = 1e-4) {
@@ -1525,6 +1527,155 @@ int main() {
 
         std::cout << "[PASS] BatchNorm2D CUDA training, autograd, EMA stats, and eval inference verified (fwd: "
                   << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
+    }
+
+    // -------------------------------------------------------------
+    // TEST 44: GPU-Native SGD Optimizer Parity and Momentum Tracking
+    // -------------------------------------------------------------
+    {
+        const size_t N = 1024;
+        std::vector<double> init_w(N);
+        std::vector<double> init_g(N);
+        for (size_t i = 0; i < N; ++i) {
+            init_w[i] = std::sin(static_cast<double>(i) * 0.1);
+            init_g[i] = std::cos(static_cast<double>(i) * 0.1);
+        }
+
+        // CPU parameter setup
+        auto w_cpu = std::make_shared<Tensor>(init_w, std::vector<size_t>{N}, true, Device::CPU);
+        w_cpu->ensure_grad_allocated();
+        std::copy(init_g.begin(), init_g.end(), w_cpu->grad->begin());
+
+        // GPU parameter setup
+        auto w_gpu = std::make_shared<Tensor>(init_w, std::vector<size_t>{N}, true, Device::CUDA);
+        w_gpu->ensure_grad_allocated();
+        CUDA_CHECK(cudaMemcpy(w_gpu->cuda_grad.get(), init_g.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+
+        // Optimizers with momentum and weight decay
+        const double lr = 0.05;
+        const double momentum = 0.9;
+        const double wd = 0.01;
+
+        SGD opt_cpu({w_cpu}, lr, momentum, wd);
+        SGD opt_gpu({w_gpu}, lr, momentum, wd);
+
+        // Benchmark multi-step execution parity
+        cudaEvent_t start, stop;
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+
+        CUDA_CHECK(cudaEventRecord(start));
+        for (int step = 0; step < 5; ++step) {
+            opt_gpu.step();
+        }
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+
+        float gpu_time = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&gpu_time, start, stop));
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
+
+        // Execute corresponding steps on CPU
+        for (int step = 0; step < 5; ++step) {
+            opt_cpu.step();
+        }
+
+        // Copy back GPU weights to verify analytical numerical parity
+        w_gpu->to(Device::CPU);
+        for (size_t i = 0; i < N; ++i) {
+            CHECK_TENSOR(close_enough((*w_gpu->data)[i], (*w_cpu->data)[i], 1e-5));
+        }
+
+        std::cout << "[PASS] GPU-native SGD momentum & weight decay step verified (5 steps: "
+                  << gpu_time << " ms)\n";
+    }
+
+    // -------------------------------------------------------------
+    // TEST 45: GPU-Native Adam Optimizer Parity (Standard & AMSGrad)
+    // -------------------------------------------------------------
+    {
+        const size_t N = 1024;
+        std::vector<double> init_w(N);
+        std::vector<double> init_g(N);
+        for (size_t i = 0; i < N; ++i) {
+            init_w[i] = std::sin(static_cast<double>(i) * 0.05);
+            init_g[i] = std::cos(static_cast<double>(i) * 0.05);
+        }
+
+        // 1. Standard Adam Test
+        {
+            auto w_cpu = std::make_shared<Tensor>(init_w, std::vector<size_t>{N}, true, Device::CPU);
+            w_cpu->ensure_grad_allocated();
+            std::copy(init_g.begin(), init_g.end(), w_cpu->grad->begin());
+
+            auto w_gpu = std::make_shared<Tensor>(init_w, std::vector<size_t>{N}, true, Device::CUDA);
+            w_gpu->ensure_grad_allocated();
+            CUDA_CHECK(cudaMemcpy(w_gpu->cuda_grad.get(), init_g.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+
+            const double lr = 0.01;
+            const double wd = 0.01;
+
+            Adam opt_cpu({w_cpu}, lr, {0.9, 0.999}, 1e-8, wd, false, false);
+            Adam opt_gpu({w_gpu}, lr, {0.9, 0.999}, 1e-8, wd, false, false);
+
+            cudaEvent_t start, stop;
+            CUDA_CHECK(cudaEventCreate(&start));
+            CUDA_CHECK(cudaEventCreate(&stop));
+
+            CUDA_CHECK(cudaEventRecord(start));
+            for (int step = 0; step < 5; ++step) {
+                opt_gpu.step();
+            }
+            CUDA_CHECK(cudaEventRecord(stop));
+            CUDA_CHECK(cudaEventSynchronize(stop));
+
+            float gpu_time = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&gpu_time, start, stop));
+            CUDA_CHECK(cudaEventDestroy(start));
+            CUDA_CHECK(cudaEventDestroy(stop));
+
+            for (int step = 0; step < 5; ++step) {
+                opt_cpu.step();
+            }
+
+            w_gpu->to(Device::CPU);
+            for (size_t i = 0; i < N; ++i) {
+                CHECK_TENSOR(close_enough((*w_gpu->data)[i], (*w_cpu->data)[i], 1e-5));
+            }
+
+            std::cout << "[PASS] GPU-native Adam standard step verified (5 steps: "
+                      << gpu_time << " ms)\n";
+        }
+
+        // 2. AMSGrad Variant Test
+        {
+            auto w_cpu_ams = std::make_shared<Tensor>(init_w, std::vector<size_t>{N}, true, Device::CPU);
+            w_cpu_ams->ensure_grad_allocated();
+            std::copy(init_g.begin(), init_g.end(), w_cpu_ams->grad->begin());
+
+            auto w_gpu_ams = std::make_shared<Tensor>(init_w, std::vector<size_t>{N}, true, Device::CUDA);
+            w_gpu_ams->ensure_grad_allocated();
+            CUDA_CHECK(cudaMemcpy(w_gpu_ams->cuda_grad.get(), init_g.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+
+            const double lr = 0.01;
+            const double wd = 0.01;
+
+            Adam opt_cpu_ams({w_cpu_ams}, lr, {0.9, 0.999}, 1e-8, wd, true, false);
+            Adam opt_gpu_ams({w_gpu_ams}, lr, {0.9, 0.999}, 1e-8, wd, true, false);
+
+            for (int step = 0; step < 5; ++step) {
+                opt_gpu_ams.step();
+                opt_cpu_ams.step();
+            }
+
+            w_gpu_ams->to(Device::CPU);
+            for (size_t i = 0; i < N; ++i) {
+                CHECK_TENSOR(close_enough((*w_gpu_ams->data)[i], (*w_cpu_ams->data)[i], 1e-5));
+            }
+
+            std::cout << "[PASS] GPU-native Adam AMSGrad variant step verified\n";
+        }
     }
 
     std::cout << "==========================================\n";

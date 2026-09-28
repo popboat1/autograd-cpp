@@ -66,8 +66,8 @@ add_library(autograd_core STATIC
     src/autograd/Tensor.cu
     src/nn/Linear.cpp
     src/nn/MLP.cpp
-    src/optim/SGD.cpp
-    src/optim/Adam.cpp
+    src/optim/SGD.cu
+    src/optim/Adam.cu
     src/nn/Loss.cu
     src/nn/Conv2D.cu
     src/nn/MaxPool2D.cu
