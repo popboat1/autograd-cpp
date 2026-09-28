@@ -61,8 +61,11 @@ __global__ void d_sparse_ce_fwd(
 ) {
     size_t b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= batch_size) return;
-    size_t target_idx = static_cast<size_t>(targets[b]);
-    if (target_idx < num_classes) {
+
+    // validate float range before casting to prevent negative PTX clamping to class 0
+    double t_val = targets[b];
+    if (t_val >= 0.0 && t_val < static_cast<double>(num_classes)) {
+        size_t target_idx = static_cast<size_t>(t_val);
         sample_losses[b] = -log_probs[b * num_classes + target_idx];
     } else {
         sample_losses[b] = 0.0;
@@ -78,8 +81,11 @@ __global__ void d_sparse_ce_bwd(
 ) {
     size_t b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= batch_size) return;
-    size_t target_idx = static_cast<size_t>(targets[b]);
-    if (target_idx < num_classes) {
+    
+    // validate float range before casting to prevent corrupting class 0
+    double t_val = targets[b];
+    if (t_val >= 0.0 && t_val < static_cast<double>(num_classes)) {
+        size_t target_idx = static_cast<size_t>(t_val);
         size_t flat_idx = b * num_classes + target_idx;
         double grad_scale = -1.0 / static_cast<double>(batch_size);
         atomicAdd(&log_probs_grad[flat_idx], upstream_grad[0] * grad_scale);
@@ -199,10 +205,11 @@ TensorPtr SparseCategoricalCrossEntropyLoss::operator()(const TensorPtr& logits,
         // extract log probabilities corresponding to the integer target indices
         #pragma omp parallel for reduction(+:loss_sum)
         for (size_t b = 0; b < batch_size; ++b) {
-            size_t target_idx = static_cast<size_t>((*targets->data)[b]);
-            if (target_idx >= num_classes) {
+            double t_val = (*targets->data)[b];
+            if (t_val < 0.0 || t_val >= static_cast<double>(num_classes)) {
                 throw std::out_of_range("sparse categorical cross entropy loss: target index out of bounds!");
             }
+            size_t target_idx = static_cast<size_t>(t_val);
             target_indices[b] = target_idx;
             loss_sum += (*log_probs->data)[b * num_classes + target_idx];
         }

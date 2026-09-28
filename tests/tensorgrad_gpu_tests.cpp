@@ -1406,6 +1406,47 @@ int main() {
                   << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
+        // test 42: SparseCategoricalCrossEntropy negative target clamping and bounds guard
+    {
+        SparseCategoricalCrossEntropyLoss criterion;
+
+        // 1. CPU validation: Negative target must throw std::out_of_range
+        auto logits_cpu = std::make_shared<Tensor>(std::vector<double>{1.0, 2.0, 3.0}, std::vector<size_t>{1, 3}, true, Device::CPU);
+        auto neg_target_cpu = std::make_shared<Tensor>(std::vector<double>{-1.0}, std::vector<size_t>{1}, false, Device::CPU);
+        bool caught_cpu_neg = false;
+        try {
+            criterion(logits_cpu, neg_target_cpu);
+        } catch (const std::out_of_range&) {
+            caught_cpu_neg = true;
+        }
+        CHECK_TENSOR(caught_cpu_neg);
+
+        // 2. GPU validation: Ensure negative target (-1.0) does NOT silently alias to class 0
+        // Batch=2: Sample 0 has target -1.0 (invalid), Sample 1 has target 2.0 (class 2)
+        std::vector<double> sample_logits = {
+            2.0, 1.0, 0.5,   // Sample 0: class 0 logit is 2.0
+            0.5, 1.0, 2.0    // Sample 1: class 2 logit is 2.0
+        };
+        auto logits_gpu = std::make_shared<Tensor>(sample_logits, std::vector<size_t>{2, 3}, true, Device::CUDA);
+        auto targets_gpu = std::make_shared<Tensor>(std::vector<double>{-1.0, 2.0}, std::vector<size_t>{2}, false, Device::CUDA);
+
+        logits_gpu->ensure_grad_allocated();
+        auto loss_gpu = criterion(logits_gpu, targets_gpu);
+        loss_gpu->backward();
+
+        logits_gpu->to(Device::CPU);
+
+        // If -1.0 aliased to class 0, Sample 0 class 0 gradient (logits_gpu->grad[0]) would be negative.
+        // With the guard, Sample 0 is ignored, so Sample 0 class 0 gradient must remain 0.0!
+        CHECK_TENSOR(close_enough((*logits_gpu->grad)[0], 0.0, 1e-5));
+
+        // Sample 1 target is class 2, so it should receive normal gradient:
+        // (prob - 1) / N != 0.0
+        CHECK_TENSOR((*logits_gpu->grad)[5] < 0.0);
+
+        std::cout << "[PASS] SparseCategoricalCrossEntropy PTX negative clamping guard verified\n";
+    }
+
     std::cout << "==========================================\n";
     std::cout << "[PASS] all GPU tests and latency benchmarks verified cleanly!\n";
     std::cout << "==========================================\n";
