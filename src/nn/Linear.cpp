@@ -31,6 +31,10 @@ Linear::Linear(int fan_in, int fan_out, const std::string& init_type)
 }
 
 TensorPtr Linear::forward(const TensorPtr& xin) {
+    // synchronize parameter device placement
+    if (weights->device != xin->device) weights->to(xin->device);
+    if (biases->device != xin->device) biases->to(xin->device);
+    
     // compute scalar dot product for each neuron
     return Tensor::matmul(xin, weights) + biases;
 }

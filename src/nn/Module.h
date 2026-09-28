@@ -35,6 +35,12 @@ public:
             p->zero_grad();
         }
     }
+
+    virtual void to(Device target_device) {
+        for (auto& p : parameters()) {
+            p->to(target_device);
+        }
+    }
 };
 
 #endif

@@ -12,3 +12,8 @@ target_link_libraries(tensorgrad_gpu_tests PRIVATE autograd_core)
 add_executable(nn_tests nn_tests.cpp)
 add_test(NAME NNIntegrationTest COMMAND nn_tests)
 target_link_libraries(nn_tests PRIVATE autograd_core)
+
+# GPU neural network integration tests
+add_executable(gpu_nn_tests gpu_nn_tests.cpp)
+add_test(NAME GPUNNIntegrationTest COMMAND gpu_nn_tests)
+target_link_libraries(gpu_nn_tests PRIVATE autograd_core)
