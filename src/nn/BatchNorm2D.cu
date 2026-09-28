@@ -1,6 +1,7 @@
 #include "BatchNorm2D.h"
 #include <cmath>
 #include <stdexcept>
+#include "utils/cuda_utils.h"
 
 BatchNorm2D::BatchNorm2D(size_t num_features, double eps, double momentum, 
                          bool affine, bool track_running_stats)
@@ -30,6 +31,44 @@ std::vector<TensorPtr> BatchNorm2D::parameters() const{
     return params;
 }
 
+// CUDA kernels for BatchNorm's running stats
+__global__ void d_batchnorm2d_update_stats(
+    double* __restrict__ running_mean,
+    double* __restrict__ running_var,
+    const double* __restrict__ current_mean,
+    const double* __restrict__ current_var,
+    size_t num_features,
+    double momentum, 
+    double unbiased_var_scale
+) {
+    size_t c = threadIdx.x + blockDim.x * blockIdx.x;
+    if(c >= num_features) return;
+
+    double mean_val = current_mean[c];
+    double unbiased_var = current_var[c] * unbiased_var_scale;
+
+    running_mean[c] = (1.0 - momentum) * running_mean[c] + momentum * mean_val;
+    running_var[c] = (1.0 - momentum) * running_var[c] + momentum * unbiased_var;
+}
+
+inline void launch_batchnorm2d_update_stats(
+    double* d_running_mean,
+    double* d_running_var,
+    const double* d_current_mean,
+    const double* d_current_var,
+    size_t num_features,
+    double momentum,
+    double unbiased_var_scale
+) {
+    constexpr int block_threads = 256;
+    int blocks = cuda_utils::ceil_div(static_cast<int>(num_features), block_threads);
+    d_batchnorm2d_update_stats<<<blocks, block_threads>>>(
+        d_running_mean, d_running_var, d_current_mean, d_current_var,
+        num_features, momentum, unbiased_var_scale
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+
 TensorPtr BatchNorm2D::forward(const TensorPtr& input) {
     if (input->shape.size() != 4) {
         throw std::invalid_argument("batchnorm2d input must be a 4D tensor matching NCHW geometry layout");
@@ -44,7 +83,18 @@ TensorPtr BatchNorm2D::forward(const TensorPtr& input) {
         throw std::invalid_argument("input channels dimension mismatch with batchnorm structural features initialization");
     }
 
-    auto eps_tensor = std::make_shared<Tensor>(std::vector<double>{eps}, std::vector<size_t>{1, 1, 1, 1}, false);
+    if (affine) {
+        if (weight->device != input->device) weight->to(input->device);
+        if (bias->device != input->device) bias->to(input->device);
+    }
+    if (track_running_stats) {
+        if (running_mean->device != input->device) running_mean->to(input->device);
+        if (running_var->device != input->device) running_var->to(input->device);
+    }
+
+    auto eps_tensor = std::make_shared<Tensor>(
+        std::vector<double>{eps}, std::vector<size_t>{1, 1, 1, 1}, false, input->device
+    );
     TensorPtr x_hat;
 
     // check module's runtime training flag inherited from Module base
@@ -70,14 +120,26 @@ TensorPtr BatchNorm2D::forward(const TensorPtr& input) {
             double N = static_cast<double>(batch_size * height * width);
             double unbiased_var_scale = (N > 1.0) ? (N / (N - 1.0)) : 1.0;
 
-            for (size_t c = 0; c < num_features; ++c) {
-                double current_mean = mean_batch->data->data()[c];
-                double current_biased_var = var_batch->data->data()[c];
-                double current_unbiased_var = current_biased_var * unbiased_var_scale;
+            if (input->device == Device::CUDA) {
+                launch_batchnorm2d_update_stats(
+                    running_mean->cuda_data.get(),
+                    running_var->cuda_data.get(),
+                    mean_batch->cuda_data.get(),
+                    var_batch->cuda_data.get(),
+                    num_features,
+                    momentum,
+                    unbiased_var_scale
+                );
+            } else {
+                for (size_t c = 0; c < num_features; ++c) {
+                    double current_mean = mean_batch->data->data()[c];
+                    double current_biased_var = var_batch->data->data()[c];
+                    double current_unbiased_var = current_biased_var * unbiased_var_scale;
 
-                // apply exponential moving average updates to internal arrays
-                running_mean->data->data()[c] = (1.0 - momentum) * running_mean->data->data()[c] + momentum * current_mean;
-                running_var->data->data()[c] = (1.0 - momentum) * running_var->data->data()[c] + momentum * current_unbiased_var;
+                    // apply exponential moving average updates to internal arrays
+                    running_mean->data->data()[c] = (1.0 - momentum) * running_mean->data->data()[c] + momentum * current_mean;
+                    running_var->data->data()[c] = (1.0 - momentum) * running_var->data->data()[c] + momentum * current_unbiased_var;
+                }
             }
         }
     } 

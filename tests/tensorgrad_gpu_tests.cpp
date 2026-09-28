@@ -10,6 +10,7 @@
 #include "nn/MaxPool2D.h"
 #include "nn/AvgPool2D.h"
 #include "nn/Loss.h"
+#include "nn/BatchNorm2D.h"
 
 // helper to assert floating point parity smoothly
 bool close_enough(double a, double b, double tol = 1e-4) {
@@ -1445,6 +1446,85 @@ int main() {
         CHECK_TENSOR((*logits_gpu->grad)[5] < 0.0);
 
         std::cout << "[PASS] SparseCategoricalCrossEntropy PTX negative clamping guard verified\n";
+    }
+
+        // test 43: BatchNorm2D forward, backward, running stats, and evaluation mode on GPU
+    {
+        // Batch=2, Channels=3, Height=4, Width=4
+        const size_t B = 2, C = 3, H = 4, W = 4;
+        const size_t total_elements = B * C * H * W;
+
+        auto raw_in = generate_4d_data(total_elements, 2.0, 1.5);
+        auto x_cpu = std::make_shared<Tensor>(raw_in, std::vector<size_t>{B, C, H, W}, true, Device::CPU);
+        auto x_gpu = std::make_shared<Tensor>(raw_in, std::vector<size_t>{B, C, H, W}, true, Device::CPU);
+
+        auto bn_cpu = std::make_shared<BatchNorm2D>(C);
+        auto bn_gpu = std::make_shared<BatchNorm2D>(C);
+
+        // 1. Training mode forward & backward pass
+        auto out_cpu = bn_cpu->forward(x_cpu);
+        auto loss_cpu = out_cpu->sum();
+        x_cpu->ensure_grad_allocated();
+        loss_cpu->backward();
+
+        x_gpu->to(Device::CUDA);
+        timer.start();
+        auto out_gpu = bn_gpu->forward(x_gpu);
+        double fwd_time = timer.stop_ms();
+
+        auto loss_gpu = out_gpu->sum();
+        timer.start();
+        loss_gpu->backward();
+        double bwd_time = timer.stop_ms();
+
+        // Transfer GPU results back for parity check
+        out_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+        bn_gpu->weight->to(Device::CPU);
+        bn_gpu->bias->to(Device::CPU);
+        bn_gpu->running_mean->to(Device::CPU);
+        bn_gpu->running_var->to(Device::CPU);
+
+        // Verify activations parity
+        CHECK_TENSOR(out_gpu->shape == out_cpu->shape);
+        for (size_t i = 0; i < total_elements; ++i) {
+            CHECK_TENSOR(close_enough((*out_gpu->data)[i], (*out_cpu->data)[i], 1e-4));
+        }
+
+        // Verify gradient routing parity
+        for (size_t i = 0; i < total_elements; ++i) {
+            CHECK_TENSOR(close_enough((*x_gpu->grad)[i], (*x_cpu->grad)[i], 1e-4));
+        }
+
+        // Verify weight and bias gradient parity
+        for (size_t c = 0; c < C; ++c) {
+            CHECK_TENSOR(close_enough((*bn_gpu->weight->grad)[c], (*bn_cpu->weight->grad)[c], 1e-4));
+            CHECK_TENSOR(close_enough((*bn_gpu->bias->grad)[c], (*bn_cpu->bias->grad)[c], 1e-4));
+        }
+
+        // Verify running statistics EMA updates parity
+        for (size_t c = 0; c < C; ++c) {
+            CHECK_TENSOR(close_enough((*bn_gpu->running_mean->data)[c], (*bn_cpu->running_mean->data)[c], 1e-4));
+            CHECK_TENSOR(close_enough((*bn_gpu->running_var->data)[c], (*bn_cpu->running_var->data)[c], 1e-4));
+        }
+
+        // 2. Evaluation / Inference mode test
+        bn_cpu->training = false;
+        bn_gpu->training = false;
+
+        auto eval_x_cpu = std::make_shared<Tensor>(raw_in, std::vector<size_t>{B, C, H, W}, false, Device::CPU);
+        auto eval_x_gpu = std::make_shared<Tensor>(raw_in, std::vector<size_t>{B, C, H, W}, false, Device::CUDA);
+
+        auto eval_out_cpu = bn_cpu->forward(eval_x_cpu);
+        auto eval_out_gpu = bn_gpu->forward(eval_x_gpu);
+        eval_out_gpu->to(Device::CPU);
+
+        for (size_t i = 0; i < total_elements; ++i) {
+            CHECK_TENSOR(close_enough((*eval_out_gpu->data)[i], (*eval_out_cpu->data)[i], 1e-4));
+        }
+
+        std::cout << "[PASS] BatchNorm2D CUDA training, autograd, EMA stats, and eval inference verified (fwd: "
+                  << fwd_time << " ms, bwd: " << bwd_time << " ms)\n";
     }
 
     std::cout << "==========================================\n";
