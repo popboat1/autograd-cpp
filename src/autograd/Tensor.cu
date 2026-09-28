@@ -3895,7 +3895,7 @@ TensorPtr Tensor::reshape(const std::vector<size_t>& new_shape){
         active_this->ensure_grad_allocated();
     }
 
-    auto out = std::make_shared<Tensor>(active_this->data, active_this->grad, new_shape, std::vector<TensorPtr>{active_this}, "reshape");
+    auto out = std::make_shared<Tensor>(active_this->data, active_this->grad, new_shape, std::vector<TensorPtr>{active_this}, "reshape", active_this->device);
     out->strides = new_strides;
     return out;
 }

@@ -1,6 +1,6 @@
 """
 run a test to verify the cpp autograd engine with 
-official pytorch autograd
+official pytorch autograd and verify CPU / CUDA parity
 """
 
 import os
@@ -20,7 +20,12 @@ project_root = os.path.dirname(tests_dir)                # framework/
 build_dir = os.path.join(project_root, "build")
 sys.path.append(build_dir)
 
-import torch
+try:
+    import torch
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
 import autograd_cpp
 
 # baseline numeric initialization constants
@@ -31,19 +36,19 @@ D_vals = [2.0, 2.0, 2.0, 2.0]              # shape: (1, 4)
 E_vals = [0.5, 0.5, 0.5, 0.5]              # shape: (1, 4)
 F_vals = [2.0, 2.0, 2.0, 2.0]              # shape: (1, 4)
 
-def run_autograd_cpp():
+def run_autograd_cpp(device=autograd_cpp.Device.CPU):
     # instantiate inputs as formal framework multi-dimensional tensors
-    A = autograd_cpp.Tensor(A_vals, [2, 3], True)
-    B = autograd_cpp.Tensor(B_vals, [3, 2], True)
-    C = autograd_cpp.Tensor(C_vals, [1, 4], True)
-    D = autograd_cpp.Tensor(D_vals, [1, 4], False)
-    E = autograd_cpp.Tensor(E_vals, [1, 4], False)
-    F = autograd_cpp.Tensor(F_vals, [1, 4], False)
+    A = autograd_cpp.Tensor(A_vals, [2, 3], True, device)
+    B = autograd_cpp.Tensor(B_vals, [3, 2], True, device)
+    C = autograd_cpp.Tensor(C_vals, [1, 4], True, device)
+    D = autograd_cpp.Tensor(D_vals, [1, 4], False, device)
+    E = autograd_cpp.Tensor(E_vals, [1, 4], False, device)
+    F = autograd_cpp.Tensor(F_vals, [1, 4], False, device)
     
     # structural matrix transformations
     x1 = A @ B                        # matmul -> (2, 2)
     x2 = x1.permute([1, 0])           # permute -> (2, 2) [non-contiguous view]
-    x3 = x2.reshape([4, 1])           # reshape -> (4, 1) [forces contiguity copy]
+    x3 = x2.reshape([4, 1])           # reshape -> (4, 1)
     x4 = x3.squeeze(1)                # squeeze -> (4,)
     x5 = x4.unsqueeze(0)              # unsqueeze -> (1, 4)
     
@@ -61,7 +66,7 @@ def run_autograd_cpp():
     x12 = x11.sum(1, True)            # Dimensional sum reduction -> (1, 1)
     x13 = x12.mean(0, False)          # Dimensional mean reduction -> (1,)
     
-    # Extra evaluation views checking index reductions safely (untracked)
+    # Extra evaluation views checking index reductions safely
     _ = x11.max(1, False)
     _ = x11.argmax(1, False)
     
@@ -70,14 +75,15 @@ def run_autograd_cpp():
     Loss.backward()
     
     return {
-        "forward_out": Loss.data,
-        "grad_A": A.grad,
-        "grad_B": B.grad,
-        "grad_C": C.grad
+        "forward_out": list(Loss.data),
+        "grad_A": list(A.grad),
+        "grad_B": list(B.grad),
+        "grad_C": list(C.grad)
     }
 
 def run_pytorch():
-    # Mirror explicit execution graph setups natively inside torch
+    if not HAS_TORCH:
+        return None
     A = torch.tensor(A_vals, dtype=torch.float64).reshape(2, 3).clone().detach().requires_grad_(True)
     B = torch.tensor(B_vals, dtype=torch.float64).reshape(3, 2).clone().detach().requires_grad_(True)
     C = torch.tensor(C_vals, dtype=torch.float64).reshape(1, 4).clone().detach().requires_grad_(True)
@@ -112,29 +118,30 @@ def run_pytorch():
         "grad_C": C.grad.flatten().tolist()
     }
     
-def verify_and_print(title, cpp_list, pt_list, tol=1e-5):
+def verify_and_print(title, test_list, ref_list, test_name="autograd_cpp", ref_name="pytorch", tol=1e-5):
     print(f"\n=== Verifying Layout: {title} ===")
-    print(f"{'Index':<8} | {'autograd_cpp':<16} | {'pytorch':<16} | {'status'}")
+    print(f"{'Index':<8} | {test_name:<16} | {ref_name:<16} | {'status'}")
     print("-" * 60)
     
-    if len(cpp_list) != len(pt_list):
-        print(f"[ERROR] Dimensional element count mismatch: {len(cpp_list)} vs {len(pt_list)}")
+    if len(test_list) != len(ref_list):
+        print(f"[ERROR] Dimensional element count mismatch: {len(test_list)} vs {len(ref_list)}")
         return False
         
     passed = True
-    for i, (cpp_v, pt_v) in enumerate(zip(cpp_list, pt_list)):
-        match = math.isclose(cpp_v, pt_v, abs_tol=tol)
+    for i, (test_v, ref_v) in enumerate(zip(test_list, ref_list)):
+        match = math.isclose(test_v, ref_v, abs_tol=tol)
         status = "MATCH" if match else "MISMATCH"
         if not match:
             passed = False
-        print(f"{i:<8} | {cpp_v:<16.6f} | {pt_v:<16.6f} | {status}")
+        print(f"{i:<8} | {test_v:<16.6f} | {ref_v:<16.6f} | {status}")
     return passed
 
 def main():
     print("Initializing comprehensive framework cross-verification suite...")
     
     try:
-        cpp_results = run_autograd_cpp()
+        cpu_results = run_autograd_cpp(autograd_cpp.Device.CPU)
+        gpu_results = run_autograd_cpp(autograd_cpp.Device.CUDA)
         pt_results = run_pytorch()
     except Exception as e:
         print(f"[CRITICAL ERROR] Graph computation execution broken: {e}")
@@ -142,24 +149,45 @@ def main():
         traceback.print_exc()
         return
 
-    # Aggregate metric alignment runs
-    checks = [
-        ("Loss Forward Output Scalar", cpp_results["forward_out"], pt_results["forward_out"]),
-        ("Gradient Matrix dL/dA", cpp_results["grad_A"], pt_results["grad_A"]),
-        ("Gradient Matrix dL/dB", cpp_results["grad_B"], pt_results["grad_B"]),
-        ("Gradient Vector dL/dC", cpp_results["grad_C"], pt_results["grad_C"]),
+    # 1. CPU vs GPU Parity Verification
+    print("\n" + "=" * 60)
+    print("STEP 1: Verifying autograd-cpp CPU vs CUDA Parity")
+    print("=" * 60)
+    checks_gpu = [
+        ("Loss Forward Output Scalar (GPU vs CPU)", gpu_results["forward_out"], cpu_results["forward_out"]),
+        ("Gradient Matrix dL/dA (GPU vs CPU)", gpu_results["grad_A"], cpu_results["grad_A"]),
+        ("Gradient Matrix dL/dB (GPU vs CPU)", gpu_results["grad_B"], cpu_results["grad_B"]),
+        ("Gradient Vector dL/dC (GPU vs CPU)", gpu_results["grad_C"], cpu_results["grad_C"]),
     ]
     
-    global_success = True
-    for title, cpp_arr, pt_arr in checks:
-        if not verify_and_print(title, cpp_arr, pt_arr):
-            global_success = False
-            
-    print("\n" + "=" * 60)
-    if global_success:
-        print("[SUCCESS] All multi-dimensional math, layout views, and activations match PyTorch perfectly!")
+    gpu_success = True
+    for title, gpu_arr, cpu_arr in checks_gpu:
+        if not verify_and_print(title, gpu_arr, cpu_arr, "autograd_GPU", "autograd_CPU"):
+            gpu_success = False
+
+    # 2. PyTorch Parity Verification (if torch is installed)
+    pt_success = True
+    if pt_results is not None:
+        print("\n" + "=" * 60)
+        print("STEP 2: Verifying autograd-cpp GPU vs PyTorch Baseline")
+        print("=" * 60)
+        checks_pt = [
+            ("Loss Forward Output Scalar", gpu_results["forward_out"], pt_results["forward_out"]),
+            ("Gradient Matrix dL/dA", gpu_results["grad_A"], pt_results["grad_A"]),
+            ("Gradient Matrix dL/dB", gpu_results["grad_B"], pt_results["grad_B"]),
+            ("Gradient Vector dL/dC", gpu_results["grad_C"], pt_results["grad_C"]),
+        ]
+        for title, gpu_arr, pt_arr in checks_pt:
+            if not verify_and_print(title, gpu_arr, pt_arr, "autograd_GPU", "PyTorch"):
+                pt_success = False
     else:
-        print("[FAILURE] Gradient misalignment detected between the autograd representations.")
+        print("\n[NOTE] PyTorch not installed in active environment - skipped PyTorch comparison.")
+
+    print("\n" + "=" * 60)
+    if gpu_success and pt_success:
+        print("[SUCCESS] All multi-dimensional math, layout views, and activations match cleanly!")
+    else:
+        print("[FAILURE] Gradient misalignment detected.")
     print("=" * 60)
 
 if __name__ == '__main__':
