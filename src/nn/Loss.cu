@@ -1,9 +1,6 @@
 #include "Loss.h"
 #include <stdexcept>
 #include <cmath>
-#include <thrust/device_vector.h>
-#include <thrust/reduce.h>
-#include <thrust/execution_policy.h>
 #include "utils/cuda_utils.h"
 
 // mean squared loss
@@ -55,20 +52,45 @@ TensorPtr CrossEntropyLoss::operator()(const TensorPtr& logits, const TensorPtr&
 __global__ void d_sparse_ce_fwd(
     const double* __restrict__ log_probs,
     const double* __restrict__ targets,
-    double* __restrict__ sample_losses,
+    double* __restrict__ out_loss,
     size_t batch_size,
     size_t num_classes
 ) {
-    size_t b = blockIdx.x * blockDim.x + threadIdx.x;
-    if (b >= batch_size) return;
+    unsigned int tid = threadIdx.x;
+    size_t b = blockIdx.x * blockDim.x + tid;
 
-    // validate float range before casting to prevent negative PTX clamping to class 0
-    double t_val = targets[b];
-    if (t_val >= 0.0 && t_val < static_cast<double>(num_classes)) {
-        size_t target_idx = static_cast<size_t>(t_val);
-        sample_losses[b] = -log_probs[b * num_classes + target_idx];
-    } else {
-        sample_losses[b] = 0.0;
+    // on chip shared mem for all 256 threads in this block
+    __shared__ double sdata[256];
+
+    // per thread scaled loss
+    double local_loss = 0.0;
+    if(b < batch_size)
+    {
+        double t_val = targets[b];
+        if(t_val >= 0.0 && t_val < static_cast<double>(num_classes))
+        {
+            size_t target_idx = static_cast<size_t>(t_val);
+            local_loss = -log_probs[b * num_classes + target_idx] / static_cast<double>(batch_size);
+        }
+    }
+
+    // copy to shared mem & parallel tree reduction
+    sdata[tid] = local_loss;
+    __syncthreads();
+
+    for(unsigned int stride {blockDim.x / 2}; stride > 0; stride >>=1)
+    {
+        if (tid < stride)
+        {
+            sdata[tid] += sdata[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // block thread 0 accums block sum
+    if (tid == 0)
+    {
+        atomicAdd(out_loss, sdata[0]);
     }
 }
 
@@ -96,14 +118,14 @@ __global__ void d_sparse_ce_bwd(
 inline void launch_sparse_ce_forward(
     const double* d_log_probs,
     const double* d_targets,
-    double* d_sample_losses,
+    double* d_out_loss,
     size_t batch_size,
     size_t num_classes
 ) {
     constexpr int block_threads = 256;
     int blocks = cuda_utils::ceil_div(static_cast<int>(batch_size), block_threads);
     d_sparse_ce_fwd<<<blocks, block_threads>>>(
-        d_log_probs, d_targets, d_sample_losses, batch_size, num_classes
+        d_log_probs, d_targets, d_out_loss, batch_size, num_classes
     );
     CUDA_CHECK(cudaGetLastError());
 }
@@ -145,40 +167,24 @@ TensorPtr SparseCategoricalCrossEntropyLoss::operator()(const TensorPtr& logits,
     auto log_probs = logits->log_softmax(1);
 
     if(logits->device == Device::CUDA){
-        // alocc a small scratchpad on GPU for each sample's loss
-        double* d_sample_losses = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_sample_losses, batch_size * sizeof(double)));
-
-        // launc forward kernel
-        launch_sparse_ce_forward(
-            log_probs->cuda_data.get(),
-            targets->cuda_data.get(),
-            d_sample_losses,
-            batch_size,
-            num_classes
-        );
-
-        // sum the sample losses in parallel GPU using thrust::reduce
-        double total_loss_sum = thrust::reduce(
-            thrust::device,
-            d_sample_losses,
-            d_sample_losses + batch_size,
-            0.0,
-            thrust::plus<double>()
-        );
-        CUDA_CHECK(cudaFree(d_sample_losses)); // free temp scratchpad
-
-        // compute negative mean loss scalar
-        double final_loss = total_loss_sum / static_cast<double>(batch_size);
-
-        // pack into a new tracking graph node
+        // new tracking graph node
         auto out = std::make_shared<Tensor>(
-            std::vector<double>{final_loss},
+            std::vector<double>{0.0},
             std::vector<size_t>{1},
             std::vector<TensorPtr>{log_probs},
             "sparse_categorical_cross_entropy",
             Device::CUDA
         );
+
+        // launc forward kernel
+        launch_sparse_ce_forward(
+            log_probs->cuda_data.get(),
+            targets->cuda_data.get(),
+            out->cuda_data.get(),
+            batch_size,
+            num_classes
+        );
+
         out->requires_grad = log_probs->requires_grad;
         // backward pass routes upstream loss scale back to selected target class nodes
         std::weak_ptr<Tensor> weak_out = out;
