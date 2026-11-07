@@ -2,6 +2,10 @@
 #include <pybind11/stl.h>
 #include <pybind11/operators.h>
 #include <pybind11/numpy.h>
+#include <stdexcept>
+#include <string>
+#include <cstring>
+
 #include "autograd/Tensor.h"
 #include "nn/Module.h"
 #include "nn/Linear.h"
@@ -76,12 +80,24 @@ PYBIND11_MODULE(autograd_cpp, m) {
                 }
                 return py::array_t<double>(t->data->size(), t->data->data(), py::cast(t)); 
             }, // getter
-            [](TensorPtr& t, py::array_t<double> v) { 
+            [](TensorPtr& t, py::array_t<double, py::array::c_style | py::array::forcecast> v) { 
                 py::buffer_info info = v.request();
+
+                // cache first
+                const size_t expected {t->data->size()};
+                if(info.size < 0 || static_cast<size_t>(info.size) != expected) 
+                {
+                    throw std::invalid_argument(
+                        "Tensor.data assignment size mismatch: expected " +
+                        std::to_string(expected) + " elements, but got " +
+                        std::to_string(info.size) + "."
+                    );
+                }
+
                 double* ptr = static_cast<double*>(info.ptr);
-                std::memcpy(t->data->data(), ptr, info.size * sizeof(double));
+                std::memcpy(t->data->data(), ptr, expected * sizeof(double));
                 if (t->device == Device::CUDA && t->cuda_data != nullptr) {
-                    CUDA_CHECK(cudaMemcpy(t->cuda_data.get(), ptr, info.size * sizeof(double), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(t->cuda_data.get(), ptr, expected * sizeof(double), cudaMemcpyHostToDevice));
                 }
             } // setter
         )
@@ -94,14 +110,27 @@ PYBIND11_MODULE(autograd_cpp, m) {
                 }
                 return py::array_t<double>(t->grad->size(), t->grad->data(), py::cast(t)); 
             },
-            [](TensorPtr& t, py::array_t<double> v) { 
+            [](TensorPtr& t, py::array_t<double, py::array::c_style | py::array::forcecast> v) { 
                 // allocate gradient buffer before copying values from numpy array
-                t->ensure_grad_allocated(); 
                 py::buffer_info info = v.request();
-                double* ptr = static_cast<double*>(info.ptr);
-                std::memcpy(t->grad->data(), ptr, info.size * sizeof(double));
+
+                // validate info.size against expected size
+                const size_t expected {t->data->size()};
+                if (info.size < 0 || static_cast<size_t>(info.size) != expected)
+                {
+                    throw std::invalid_argument(
+                        "Tensor.grad assignment size mismatch: expected " +
+                        std::to_string(expected) + " elements, but got " +
+                        std::to_string(info.size) + "."
+                    );
+                }
+                
+                t->ensure_grad_allocated(); 
+                const double* ptr = static_cast<const double*>(info.ptr);
+                
+                std::memcpy(t->grad->data(), ptr, expected * sizeof(double));
                 if (t->device == Device::CUDA && t->cuda_grad != nullptr) {
-                    CUDA_CHECK(cudaMemcpy(t->cuda_grad.get(), ptr, info.size * sizeof(double), cudaMemcpyHostToDevice));
+                    CUDA_CHECK(cudaMemcpy(t->cuda_grad.get(), ptr, expected * sizeof(double), cudaMemcpyHostToDevice));
                 }
             }
         )
