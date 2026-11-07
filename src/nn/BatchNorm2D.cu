@@ -159,3 +159,14 @@ TensorPtr BatchNorm2D::forward(const TensorPtr& input) {
     }
     return x_hat;
 }
+
+void BatchNorm2D::to(Device target_device)
+{
+    Module::to(target_device);
+
+    if(track_running_stats)
+    {
+        if(running_mean) running_mean->to(target_device);
+        if(running_var) running_var->to(target_device);
+    }
+}

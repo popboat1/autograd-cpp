@@ -28,6 +28,8 @@ public:
 
     TensorPtr forward(const TensorPtr& input) override;
     std::vector<TensorPtr> parameters() const override;
+
+    void to(Device target_device) override;
 };
 
 #endif

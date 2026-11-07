@@ -40,6 +40,14 @@ public:
         for (auto& p : parameters()) {
             p->to(target_device);
         }
+
+        for(auto& mod : sub_modules)
+        {
+            if(mod)
+            {
+                mod->to(target_device);
+            }
+        }
     }
 };
 
