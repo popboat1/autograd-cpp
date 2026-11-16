@@ -1787,6 +1787,142 @@ int main() {
                   << fwd_ms << " ms, bwd: " << bwd_ms << " ms)\n";
     }
 
+    // test 47: dropout2d spatial channel masking, grad routing, eval, and cpu/gpu parity
+    {
+        auto expect_invalid_arg = [](auto&& fn) {
+            try {
+                fn();
+                return false;
+            } catch (const std::invalid_argument&) {
+                return true;
+            }
+        };
+
+        CHECK_TENSOR(expect_invalid_arg([]() { Dropout2D(-0.1); }));
+        CHECK_TENSOR(expect_invalid_arg([]() { Dropout2D(1.0); }));
+
+        auto d2_guard = std::make_shared<Dropout2D>(0.5);
+        auto t2d = std::make_shared<Tensor>(std::vector<double>(6, 1.0), std::vector<size_t>{2, 3}, false, Device::CUDA);
+        auto t3d = std::make_shared<Tensor>(std::vector<double>(12, 1.0), std::vector<size_t>{2, 2, 3}, false, Device::CUDA);
+        CHECK_TENSOR(expect_invalid_arg([&]() { d2_guard->forward(t2d); }));
+
+        // rank validation must still fire when eval mode bypasses masking
+        d2_guard->eval();
+        CHECK_TENSOR(expect_invalid_arg([&]() { d2_guard->forward(t3d); }));
+
+        constexpr size_t B = 64, C = 128, H = 4, W = 4;
+        constexpr size_t spatial_size = H * W;
+        constexpr size_t num_planes = B * C;
+        constexpr size_t total_elements = num_planes * spatial_size;
+        constexpr double drop_prob = 0.35;
+        constexpr double inv_keep_scale = 1.0 / (1.0 - drop_prob);
+        constexpr double pre_grad = 1.0;
+        constexpr double strict_tol = 1e-12;
+        constexpr double drop_rate_tol = 0.025;
+        constexpr double mean_tol = 0.12;
+        constexpr unsigned int test_seed = 1337;
+
+        // positive offset keeps every entry strictly > 0 so zeroed planes are unambiguous
+        auto x_vals = generate_4d_data(total_elements, 20.0, 0.25);
+        auto w_vals = generate_4d_data(total_elements, 15.0, 0.10);
+        double expected_in_mean = 0.0;
+        for (double v : x_vals) expected_in_mean += v;
+        expected_in_mean /= static_cast<double>(total_elements);
+
+        auto x_gpu = std::make_shared<Tensor>(x_vals, std::vector<size_t>{B, C, H, W}, true, Device::CUDA);
+        auto w_gpu = std::make_shared<Tensor>(w_vals, std::vector<size_t>{B, C, H, W}, false, Device::CUDA);
+
+        // pre-seed grad to catch accidental overwrites instead of += accumulation
+        x_gpu->ensure_grad_allocated();
+        std::vector<double> seed_grad(total_elements, pre_grad);
+        CHECK_CUDA(cudaMemcpy(x_gpu->cuda_grad.get(), seed_grad.data(), total_elements * sizeof(double), cudaMemcpyHostToDevice));
+
+        RNG::manual_seed(test_seed);
+        auto drop2d = std::make_shared<Dropout2D>(drop_prob);
+        timer.start();
+        auto y_gpu = drop2d->forward(x_gpu);
+        double fwd_ms = timer.stop_ms();
+
+        auto weighted_loss = (y_gpu * w_gpu)->sum();
+        timer.start();
+        weighted_loss->backward();
+        double bwd_ms = timer.stop_ms();
+
+        y_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+
+        size_t dropped_planes = 0;
+        double out_sum = 0.0;
+        for (size_t bc = 0; bc < num_planes; ++bc) {
+            size_t base = bc * spatial_size;
+            bool plane_kept = ((*y_gpu->data)[base] != 0.0);
+            if (!plane_kept) ++dropped_planes;
+
+            for (size_t s = 0; s < spatial_size; ++s) {
+                size_t idx = base + s;
+                double yi = (*y_gpu->data)[idx];
+                double gi = (*x_gpu->grad)[idx];
+                if (!plane_kept) {
+                    CHECK_CLOSE(yi, 0.0, strict_tol);
+                    CHECK_CLOSE(gi, pre_grad, strict_tol);
+                } else {
+                    CHECK_CLOSE(yi, x_vals[idx] * inv_keep_scale, strict_tol);
+                    CHECK_CLOSE(gi, pre_grad + w_vals[idx] * inv_keep_scale, strict_tol);
+                }
+                out_sum += yi;
+            }
+        }
+
+        double empirical_drop_rate = static_cast<double>(dropped_planes) / static_cast<double>(num_planes);
+        double empirical_out_mean = out_sum / static_cast<double>(total_elements);
+        CHECK_CLOSE(empirical_drop_rate, drop_prob, drop_rate_tol);
+        CHECK_CLOSE(empirical_out_mean, expected_in_mean, mean_tol);
+
+        // cpu openmp vs cuda parity under matching seed
+        constexpr size_t pB = 4, pC = 8, pH = 5, pW = 5;
+        constexpr size_t pTotal = pB * pC * pH * pW;
+        constexpr unsigned int parity_seed = 9001;
+        auto p_vals = generate_4d_data(pTotal, -2.0, 0.5);
+        auto pw_vals = generate_4d_data(pTotal, 12.0, 0.1);
+
+        Dropout2D drop2d_parity(0.4);
+
+        RNG::manual_seed(parity_seed);
+        auto x_cpu_p = std::make_shared<Tensor>(p_vals, std::vector<size_t>{pB, pC, pH, pW}, true, Device::CPU);
+        auto w_cpu_p = std::make_shared<Tensor>(pw_vals, std::vector<size_t>{pB, pC, pH, pW}, false, Device::CPU);
+        auto y_cpu_p = drop2d_parity.forward(x_cpu_p);
+        (y_cpu_p * w_cpu_p)->sum()->backward();
+
+        RNG::manual_seed(parity_seed);
+        auto x_gpu_p = std::make_shared<Tensor>(p_vals, std::vector<size_t>{pB, pC, pH, pW}, true, Device::CUDA);
+        auto w_gpu_p = std::make_shared<Tensor>(pw_vals, std::vector<size_t>{pB, pC, pH, pW}, false, Device::CUDA);
+        auto y_gpu_p = drop2d_parity.forward(x_gpu_p);
+        (y_gpu_p * w_gpu_p)->sum()->backward();
+
+        y_gpu_p->to(Device::CPU);
+        x_gpu_p->to(Device::CPU);
+        for (size_t i = 0; i < pTotal; ++i) {
+            CHECK_CLOSE((*y_gpu_p->data)[i], (*y_cpu_p->data)[i], strict_tol);
+            CHECK_CLOSE((*x_gpu_p->grad)[i], (*x_cpu_p->grad)[i], strict_tol);
+        }
+
+        // eval bypass and p = 0 must return the exact input pointer without allocating
+        Sequential seq;
+        seq.add(drop2d);
+        seq.eval();
+        CHECK_TENSOR(drop2d->training == false);
+        CHECK_TENSOR(seq.forward(x_gpu_p).get() == x_gpu_p.get());
+
+        seq.train();
+        CHECK_TENSOR(drop2d->training == true);
+
+        Dropout2D zero_drop2d(0.0);
+        CHECK_TENSOR(zero_drop2d.forward(x_gpu_p).get() == x_gpu_p.get());
+
+        std::cout << "[PASS] GPU-native Dropout2D channel-plane masking, grad routing, eval toggle & CPU/GPU parity verified (fwd: "
+                  << fwd_ms << " ms, bwd: " << bwd_ms << " ms)\n";
+    }
+
     std::cout << "==========================================\n";
     std::cout << "[PASS] all GPU tests and latency benchmarks verified cleanly!\n";
     std::cout << "==========================================\n";
