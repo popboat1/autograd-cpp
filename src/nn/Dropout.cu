@@ -291,7 +291,7 @@ TensorPtr Dropout2D::forward(const TensorPtr& input) {
         }
 
         #pragma omp parallel for
-        for(int i{}; i < total_elements; ++i)
+        for(size_t i{}; i < total_elements; ++i)
         {
             out_vals[i] = (*x->data)[i] * (*channel_mask)[i / spatial_size];
         }
@@ -316,7 +316,7 @@ TensorPtr Dropout2D::forward(const TensorPtr& input) {
                 x_ptr->ensure_grad_allocated();
 
                 #pragma omp parallel for
-                for(int i{}; i < total_elements; ++i)
+                for(size_t i{}; i < total_elements; ++i)
                 {
                     (*x_ptr->grad)[i] += (*out_ptr->grad)[i] * (*channel_mask)[i / spatial_size];
                 }
