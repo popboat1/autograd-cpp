@@ -11,6 +11,9 @@
 #include "nn/AvgPool2D.h"
 #include "nn/Loss.h"
 #include "nn/BatchNorm2D.h"
+#include "nn/Dropout.h"
+#include "nn/Sequential.h"
+#include "utils/RNG.h"
 #include "optim/SGD.h"
 #include "optim/Adam.h"
 
@@ -1676,6 +1679,112 @@ int main() {
 
             std::cout << "[PASS] GPU-native Adam AMSGrad variant step verified\n";
         }
+    }
+
+    // -------------------------------------------------------------
+    // TEST 46: GPU-Native Inverted Dropout (Expectation, Grad Routing, Eval & Parity)
+    // -------------------------------------------------------------
+    {
+        // 1. Constructor range validation: p must lie in [0.0, 1.0)
+        bool caught_neg = false, caught_one = false, caught_gt_one = false;
+        try { Dropout d(-0.1); } catch (const std::invalid_argument&) { caught_neg = true; }
+        try { Dropout d(1.0); }  catch (const std::invalid_argument&) { caught_one = true; }
+        try { Dropout d(1.5); }  catch (const std::invalid_argument&) { caught_gt_one = true; }
+        CHECK_TENSOR(caught_neg && caught_one && caught_gt_one);
+
+        // 2. Statistical expectation E[out] ~= x, inverted scaling, and exact grad routing on GPU
+        RNG::manual_seed(42);
+        const size_t N = 100000;
+        const double p = 0.4;
+        const double scale = 1.0 / (1.0 - p);
+        const double const_val = 3.0;
+
+        auto x_gpu = std::make_shared<Tensor>(
+            std::vector<double>(N, const_val), std::vector<size_t>{100, 1000}, true, Device::CUDA
+        );
+        // Pre-seed x_gpu->grad with 1.0 everywhere to verify backward accumulates (+=) for residual paths
+        x_gpu->ensure_grad_allocated();
+        std::vector<double> ones_grad(N, 1.0);
+        CHECK_CUDA(cudaMemcpy(x_gpu->cuda_grad.get(), ones_grad.data(), N * sizeof(double), cudaMemcpyHostToDevice));
+
+        auto drop = std::make_shared<Dropout>(p);
+        timer.start();
+        auto y_gpu = drop->forward(x_gpu);
+        double fwd_ms = timer.stop_ms();
+
+        auto loss_gpu = y_gpu->sum();
+        timer.start();
+        loss_gpu->backward();
+        double bwd_ms = timer.stop_ms();
+
+        y_gpu->to(Device::CPU);
+        x_gpu->to(Device::CPU);
+
+        double sum_out = 0.0;
+        size_t zero_count = 0;
+        for (size_t i = 0; i < N; ++i) {
+            double yi = (*y_gpu->data)[i];
+            double gi = (*x_gpu->grad)[i];
+            if (yi == 0.0) {
+                ++zero_count;
+                // Dropped unit: upstream grad must be masked to 0, leaving pre-existing grad (1.0) untouched
+                CHECK_CLOSE(gi, 1.0, 1e-12);
+            } else {
+                // Kept unit: output scaled by 1/(1-p), grad accumulated by +1/(1-p)
+                CHECK_CLOSE(yi, const_val * scale, 1e-12);
+                CHECK_CLOSE(gi, 1.0 + scale, 1e-12);
+            }
+            sum_out += yi;
+        }
+
+        double empirical_drop_rate = static_cast<double>(zero_count) / static_cast<double>(N);
+        double empirical_mean = sum_out / static_cast<double>(N);
+        CHECK_CLOSE(empirical_drop_rate, p, 0.015);
+        CHECK_CLOSE(empirical_mean, const_val, 0.05);
+
+        // 3. Deterministic CPU vs CUDA bitwise parity under RNG::manual_seed
+        const size_t M = 2048;
+        std::vector<double> vals(M);
+        for (size_t i = 0; i < M; ++i) vals[i] = static_cast<double>(i % 17) * 0.25 - 2.0;
+
+        Dropout drop_parity(0.35);
+
+        RNG::manual_seed(2026);
+        auto x_cpu_p = std::make_shared<Tensor>(vals, std::vector<size_t>{32, 64}, true, Device::CPU);
+        auto y_cpu_p = drop_parity.forward(x_cpu_p);
+        y_cpu_p->sum()->backward();
+
+        RNG::manual_seed(2026);
+        auto x_gpu_p = std::make_shared<Tensor>(vals, std::vector<size_t>{32, 64}, true, Device::CUDA);
+        auto y_gpu_p = drop_parity.forward(x_gpu_p);
+        y_gpu_p->sum()->backward();
+
+        y_gpu_p->to(Device::CPU);
+        x_gpu_p->to(Device::CPU);
+        for (size_t i = 0; i < M; ++i) {
+            CHECK_CLOSE((*y_gpu_p->data)[i], (*y_cpu_p->data)[i], 1e-12);
+            CHECK_CLOSE((*x_gpu_p->grad)[i], (*x_cpu_p->grad)[i], 1e-12);
+        }
+
+        // 4. eval() toggle (direct & via Sequential) and p = 0.0 identity pass-through
+        Sequential seq;
+        seq.add(drop);
+        seq.eval();
+        CHECK_TENSOR(drop->training == false);
+
+        auto eval_in = std::make_shared<Tensor>(vals, std::vector<size_t>{32, 64}, true, Device::CUDA);
+        auto eval_out = seq.forward(eval_in);
+        CHECK_TENSOR(eval_out.get() == eval_in.get()); // exact zero-copy identity pass-through
+
+        seq.train();
+        CHECK_TENSOR(drop->training == true);
+
+        Dropout zero_drop(0.0);
+        auto zero_out = zero_drop.forward(eval_in);
+        CHECK_TENSOR(zero_out.get() == eval_in.get());
+
+        std::cout << "[PASS] GPU-native Dropout expectation, grad routing, eval toggle & CPU/GPU parity verified (fwd: "
+                  << fwd_ms << " ms, bwd: " << bwd_ms << " ms)\n";
     }
 
     std::cout << "==========================================\n";

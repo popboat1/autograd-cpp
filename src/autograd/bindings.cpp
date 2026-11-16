@@ -19,6 +19,7 @@
 #include "utils/RNG.h"
 #include "nn/BatchNorm2D.h"
 #include "nn/AvgPool2D.h"
+#include "nn/Dropout.h"
 
 namespace py = pybind11;
 
@@ -215,6 +216,9 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def("parameters", &Module::parameters)
         .def("zero_grad", &Module::zero_grad)
         .def("to", &Module::to, py::arg("device"))
+        .def_readwrite("training", &Module::training)
+        .def("train", &Module::train, py::arg("mode") = true)
+        .def("eval", &Module::eval)
         .def("__call__", [](Module& self, const TensorPtr& input) { return self.forward(input); })
         .def("__setattr__", [](py::object self, const std::string& name, py::object value) {
             if (py::isinstance<Module>(value)) {
@@ -268,11 +272,18 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def(py::init<size_t, double, double, bool, bool>(),
              py::arg("num_features"), py::arg("eps") = 1e-5, py::arg("momentum") = 0.1,
              py::arg("affine") = true, py::arg("track_running_stats") = true)
-        .def_readwrite("training", &BatchNorm2D::training)
         .def_readonly("running_mean", &BatchNorm2D::running_mean)
         .def_readonly("running_var", &BatchNorm2D::running_var)
         .def_readonly("weight", &BatchNorm2D::weight)
         .def_readonly("bias", &BatchNorm2D::bias);
+
+    py::class_<Dropout, Module, std::shared_ptr<Dropout>>(m, "Dropout")
+        .def(py::init<double>(), py::arg("p") = 0.5)
+        .def_readonly("p", &Dropout::p);
+
+    py::class_<Dropout2D, Module, std::shared_ptr<Dropout2D>>(m, "Dropout2D")
+        .def(py::init<double>(), py::arg("p") = 0.5)
+        .def_readonly("p", &Dropout2D::p);
     
     // ----------------------------------------------------
     // OPTIMIZER & LOSS BINDINGS

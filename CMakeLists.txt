@@ -74,6 +74,7 @@ add_library(autograd_core STATIC
     src/nn/AvgPool2D.cu
     src/nn/BatchNorm2D.cu
     src/nn/Sequential.cpp
+    src/nn/Dropout.cu
 )
 set_target_properties(autograd_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(autograd_core PUBLIC OpenMP::OpenMP_CXX CUDA::cublas CUDA::cudart)
