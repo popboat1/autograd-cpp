@@ -13,7 +13,6 @@ public:
     double momentum;
     bool affine;
     bool track_running_stats;
-    bool training; // track module runtime mode state (training vs evaluation)
 
     // differentiable tracking parameters
     TensorPtr weight; // gamma scaling factor

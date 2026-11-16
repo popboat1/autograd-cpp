@@ -1,12 +1,12 @@
 #include "BatchNorm2D.h"
-#include <cmath>
 #include <stdexcept>
 #include "utils/cuda_utils.h"
 
 BatchNorm2D::BatchNorm2D(size_t num_features, double eps, double momentum, 
                          bool affine, bool track_running_stats)
     : num_features(num_features), eps(eps), momentum(momentum), 
-      affine(affine), track_running_stats(track_running_stats), training(true) {
+      affine(affine), track_running_stats(track_running_stats) 
+{
 
     std::vector<size_t> param_shape = {1, num_features, 1, 1};
 

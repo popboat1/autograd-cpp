@@ -22,3 +22,13 @@ std::vector<TensorPtr> Sequential::parameters() const {
     }
     return all_params;
 }
+
+void Sequential::train(bool mode)
+{
+    this->training = mode;
+
+    for(auto& layer : layers)
+    {
+        if(layer) layer->train(mode);
+    }
+}

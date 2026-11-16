@@ -13,6 +13,8 @@ public:
     TensorPtr forward(const TensorPtr& input) override;
     std::vector<TensorPtr> parameters() const override;
 
+    void train(bool mode = true) override;
+
     void to(Device target_device) override {
         for (auto& layer : layers) {
             layer->to(target_device);

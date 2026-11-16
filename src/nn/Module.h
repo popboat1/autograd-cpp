@@ -12,6 +12,19 @@ protected:
 public:
     virtual ~Module() = default;
 
+    bool training = true;
+    virtual void train(bool mode = true)
+    {
+        this->training = mode;
+
+        for(auto& mod : sub_modules)
+        {
+            if(mod) mod->train(mode);
+        }
+    }
+
+    void eval() { train(false); }
+
     virtual TensorPtr forward(const TensorPtr& input) = 0;
 
     // every layer must have this!!
