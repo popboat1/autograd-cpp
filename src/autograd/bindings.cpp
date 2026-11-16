@@ -20,6 +20,8 @@
 #include "nn/BatchNorm2D.h"
 #include "nn/AvgPool2D.h"
 #include "nn/Dropout.h"
+#include "data/Dataset.h"
+#include "data/DataLoader.h"
 
 namespace py = pybind11;
 
@@ -48,6 +50,30 @@ public:
     }
 };
 
+class PyDataset : public Dataset {
+public:
+    using Dataset::Dataset;
+
+    size_t size() const override {
+        PYBIND11_OVERRIDE_PURE(
+            size_t,
+            Dataset,
+            size
+        );
+    }
+
+    using SamplePair = std::pair<TensorPtr, TensorPtr>;
+
+    SamplePair get(size_t index) const override {
+        PYBIND11_OVERRIDE_PURE(
+            SamplePair,
+            Dataset,
+            get,
+            index
+        );
+    }
+};
+
 PYBIND11_MODULE(autograd_cpp, m) {
     m.doc() = "C++ ML Framework Python Bindings (Tensor Engine)";
 
@@ -68,11 +94,11 @@ PYBIND11_MODULE(autograd_cpp, m) {
     // TENSOR BINDINGS
     // ----------------------------------------------------
     py::class_<Tensor, std::shared_ptr<Tensor>>(m, "Tensor")
-        .def(py::init([](py::array_t<double> values, std::vector<size_t> shape, bool requires_grad, Device device) {
+        .def(py::init([](py::array_t<double, py::array::c_style | py::array::forcecast> values, std::vector<size_t> shape, bool requires_grad, Device device) {
             py::buffer_info info = values.request();
             double* ptr = static_cast<double*>(info.ptr);
             std::vector<double> v(ptr, ptr + info.size);
-            return std::make_shared<Tensor>(v, shape, requires_grad, device);
+            return std::make_shared<Tensor>(std::move(v), shape, requires_grad, device);
         }), py::arg("values"), py::arg("shape"), py::arg("requires_grad") = true, py::arg("device") = Device::CPU)
         .def_property("data",
             [](const TensorPtr& t) -> py::array_t<double> { 
@@ -225,7 +251,7 @@ PYBIND11_MODULE(autograd_cpp, m) {
                 auto native_self = self.cast<std::shared_ptr<Module>>();
                 auto native_mod = value.cast<std::shared_ptr<Module>>();
                 
-                native_self->register_submodule(native_mod);
+                native_self->register_submodule(std::move(native_mod));
             }
             
             auto builtins = py::module_::import("builtins");
@@ -322,4 +348,30 @@ PYBIND11_MODULE(autograd_cpp, m) {
     py::class_<SparseCategoricalCrossEntropyLoss>(m, "SparseCategoricalCrossEntropyLoss")
         .def(py::init<>())
         .def("__call__", &SparseCategoricalCrossEntropyLoss::operator());
+
+    // ----------------------------------------------------
+    // DATASET & DATALOADER BINDINGS
+    // ----------------------------------------------------
+    py::class_<Dataset, PyDataset, std::shared_ptr<Dataset>>(m, "Dataset")
+        .def(py::init<>())
+        .def("size", &Dataset::size)
+        .def("get", &Dataset::get, py::arg("index"))
+        .def("__len__", &Dataset::size)
+        .def("__getitem__", &Dataset::get, py::arg("index"));
+
+    py::class_<TensorDataset, Dataset, std::shared_ptr<TensorDataset>>(m, "TensorDataset")
+        .def(py::init<TensorPtr, TensorPtr>(), py::arg("data"), py::arg("targets"));
+
+    py::class_<DataLoader, std::shared_ptr<DataLoader>>(m, "DataLoader")
+        .def(py::init<std::shared_ptr<Dataset>, size_t, bool, bool, Device>(),
+             py::arg("dataset"),
+             py::arg("batch_size"),
+             py::arg("shuffle") = false,
+             py::arg("drop_last") = false,
+             py::arg("device") = Device::CPU)
+        .def("num_batches", &DataLoader::num_batches)
+        .def("__len__", &DataLoader::num_batches)
+        .def("__iter__", [](DataLoader& self) {
+            return py::make_iterator(self.begin(), self.end());
+        }, py::keep_alive<0, 1>());
 }

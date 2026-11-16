@@ -13,6 +13,8 @@
 #include "nn/BatchNorm2D.h"
 #include "nn/Dropout.h"
 #include "nn/Sequential.h"
+#include "data/Dataset.h"
+#include "data/DataLoader.h"
 #include "utils/RNG.h"
 #include "optim/SGD.h"
 #include "optim/Adam.h"
@@ -1921,6 +1923,170 @@ int main() {
 
         std::cout << "[PASS] GPU-native Dropout2D channel-plane masking, grad routing, eval toggle & CPU/GPU parity verified (fwd: "
                   << fwd_ms << " ms, bwd: " << bwd_ms << " ms)\n";
+    }
+
+    // test 48: dataset/dataloader shuffling, batch collation, cuda transfer, and multi-epoch leak check
+    {
+        auto expect_invalid_arg = [](auto&& fn) {
+            try {
+                fn();
+                return false;
+            } catch (const std::invalid_argument&) {
+                return true;
+            }
+        };
+
+        auto expect_out_of_range = [](auto&& fn) {
+            try {
+                fn();
+                return false;
+            } catch (const std::out_of_range&) {
+                return true;
+            }
+        };
+
+        constexpr size_t N = 10;
+        constexpr size_t C = 2, H = 3, W = 4;
+        constexpr size_t sample_elems = C * H * W;
+        constexpr size_t batch_size = 4;
+        constexpr double sample_tag_scale = 100.0;
+        constexpr double strict_tol = 1e-12;
+
+        std::vector<double> x_vals(N * sample_elems);
+        std::vector<double> y_vals(N);
+        for (size_t i = 0; i < N; ++i) {
+            y_vals[i] = static_cast<double>(i);
+            for (size_t k = 0; k < sample_elems; ++k) {
+                x_vals[i * sample_elems + k] = static_cast<double>(i) * sample_tag_scale + static_cast<double>(k);
+            }
+        }
+
+        // construct on cuda to verify dataset normalizes to host without mutating caller tensor
+        auto x_cuda = std::make_shared<Tensor>(x_vals, std::vector<size_t>{N, C, H, W}, false, Device::CUDA);
+        auto y_cpu = std::make_shared<Tensor>(y_vals, std::vector<size_t>{N}, false, Device::CPU);
+        auto bad_y = std::make_shared<Tensor>(std::vector<double>(N + 1, 0.0), std::vector<size_t>{N + 1}, false, Device::CPU);
+
+        CHECK_TENSOR(expect_invalid_arg([&]() { TensorDataset(nullptr, y_cpu); }));
+        CHECK_TENSOR(expect_invalid_arg([&]() { TensorDataset(x_cuda, bad_y); }));
+
+        auto ds = std::make_shared<TensorDataset>(x_cuda, y_cpu);
+        CHECK_EQUAL(ds->size(), N);
+        CHECK_TENSOR(x_cuda->device == Device::CUDA);
+        CHECK_TENSOR(expect_out_of_range([&]() { ds->get(N); }));
+
+        auto [s3_x, s3_y] = ds->get(3);
+        CHECK_TENSOR(s3_x->shape == (std::vector<size_t>{C, H, W}));
+        CHECK_TENSOR(s3_y->shape.empty());
+        CHECK_CLOSE((*s3_y->data)[0], 3.0, strict_tol);
+        for (size_t k = 0; k < sample_elems; ++k) {
+            CHECK_CLOSE((*s3_x->data)[k], 3.0 * sample_tag_scale + static_cast<double>(k), strict_tol);
+        }
+
+        CHECK_TENSOR(expect_invalid_arg([&]() { DataLoader(nullptr, batch_size); }));
+        CHECK_TENSOR(expect_invalid_arg([&]() { DataLoader(ds, 0); }));
+
+        // drop_last=false keeps partial final batch; drop_last=true truncates it
+        DataLoader seq_loader(ds, batch_size, false, false, Device::CPU);
+        CHECK_EQUAL(seq_loader.num_batches(), size_t{3});
+        std::vector<size_t> seq_sizes;
+        std::vector<size_t> seq_targets;
+        for (auto& [bx, by] : seq_loader) {
+            CHECK_TENSOR(bx->device == Device::CPU);
+            CHECK_TENSOR(by->device == Device::CPU);
+            seq_sizes.push_back(bx->shape[0]);
+            CHECK_TENSOR(bx->shape == (std::vector<size_t>{bx->shape[0], C, H, W}));
+            CHECK_TENSOR(by->shape == (std::vector<size_t>{bx->shape[0]}));
+            for (size_t b = 0; b < bx->shape[0]; ++b) {
+                seq_targets.push_back(static_cast<size_t>((*by->data)[b]));
+            }
+        }
+        CHECK_TENSOR(seq_sizes == (std::vector<size_t>{4, 4, 2}));
+        CHECK_TENSOR(seq_targets == (std::vector<size_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}));
+
+        DataLoader drop_loader(ds, batch_size, false, true, Device::CPU);
+        CHECK_EQUAL(drop_loader.num_batches(), size_t{2});
+        std::vector<size_t> drop_sizes;
+        for (auto& [bx, by] : drop_loader) {
+            drop_sizes.push_back(bx->shape[0]);
+            CHECK_EQUAL(by->shape[0], bx->shape[0]);
+        }
+        CHECK_TENSOR(drop_sizes == (std::vector<size_t>{4, 4}));
+
+        // shuffle=true with cuda collation must keep (x, y) paired and permute across epochs
+        RNG::manual_seed(2026);
+        DataLoader cuda_loader(ds, batch_size, true, false, Device::CUDA);
+
+        auto collect_epoch = [&](std::vector<size_t>& order_out) {
+            order_out.clear();
+            std::vector<size_t> seen(N, 0);
+            for (auto& [bx, by] : cuda_loader) {
+                CHECK_TENSOR(bx->device == Device::CUDA);
+                CHECK_TENSOR(by->device == Device::CUDA);
+                bx->to(Device::CPU);
+                by->to(Device::CPU);
+
+                for (size_t b = 0; b < bx->shape[0]; ++b) {
+                    size_t label = static_cast<size_t>(std::llround((*by->data)[b]));
+                    CHECK_TENSOR(label < N);
+                    seen[label]++;
+                    order_out.push_back(label);
+                    for (size_t k = 0; k < sample_elems; ++k) {
+                        double expected = static_cast<double>(label) * sample_tag_scale + static_cast<double>(k);
+                        CHECK_CLOSE((*bx->data)[b * sample_elems + k], expected, strict_tol);
+                    }
+                }
+            }
+            for (size_t i = 0; i < N; ++i) {
+                CHECK_EQUAL(seen[i], size_t{1});
+            }
+        };
+
+        std::vector<size_t> epoch1_order, epoch2_order;
+        collect_epoch(epoch1_order);
+        collect_epoch(epoch2_order);
+        CHECK_TENSOR(epoch1_order != epoch2_order);
+
+        // multi-epoch vram leak check after cuda allocator warmup
+        constexpr size_t leak_N = 256;
+        constexpr size_t leak_elems = 4 * 16 * 16;
+        constexpr size_t leak_bs = 64;
+        constexpr int leak_epochs = 20;
+
+        auto leak_x = std::make_shared<Tensor>(
+            generate_4d_data(leak_N * leak_elems), std::vector<size_t>{leak_N, 4, 16, 16}, false, Device::CPU
+        );
+        auto leak_y = std::make_shared<Tensor>(
+            std::vector<double>(leak_N, 1.0), std::vector<size_t>{leak_N}, false, Device::CPU
+        );
+        auto leak_ds = std::make_shared<TensorDataset>(leak_x, leak_y);
+        DataLoader leak_loader(leak_ds, leak_bs, true, false, Device::CUDA);
+
+        {
+            for (auto& [bx, by] : leak_loader) {
+                CHECK_TENSOR(bx->device == Device::CUDA);
+                CHECK_TENSOR(by->device == Device::CUDA);
+            }
+        }
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        size_t free_before = 0, total_mem = 0;
+        CHECK_CUDA(cudaMemGetInfo(&free_before, &total_mem));
+
+        {
+            for (int ep = 0; ep < leak_epochs; ++ep) {
+                for (auto& [bx, by] : leak_loader) {
+                    CHECK_EQUAL(bx->shape[0], leak_bs);
+                    CHECK_EQUAL(by->shape[0], leak_bs);
+                }
+            }
+        }
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        size_t free_after = 0;
+        CHECK_CUDA(cudaMemGetInfo(&free_after, &total_mem));
+        CHECK_TENSOR(free_after >= free_before);
+
+        std::cout << "[PASS] Dataset & DataLoader shuffling, CUDA collation & multi-epoch zero-leak verified\n";
     }
 
     std::cout << "==========================================\n";
