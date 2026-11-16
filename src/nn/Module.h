@@ -1,6 +1,8 @@
 #ifndef MODULE_H
 #define MODULE_H
 
+#include <memory>
+#include <utility>
 #include <vector>
 #include "autograd/Tensor.h"
 
@@ -39,7 +41,7 @@ public:
 
     // registers a child layer dependency
     void register_submodule(std::shared_ptr<Module> module) {
-        sub_modules.push_back(module);
+        sub_modules.push_back(std::move(module));
     }
 
     // function to clear grads before training step

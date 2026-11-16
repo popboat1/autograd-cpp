@@ -1,7 +1,8 @@
 #include "Sequential.h"
+#include <utility>
 
 void Sequential::add(std::shared_ptr<Module> layer){
-    layers.push_back(layer);
+    layers.push_back(std::move(layer));
 }
 
 TensorPtr Sequential::forward(const TensorPtr& input) {
