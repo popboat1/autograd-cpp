@@ -50,7 +50,7 @@ python3 tests/pytorch-tests/phase5_3_5_interop_verification.py
   - `GPUNNIntegrationTest`: **1** `[PASS]` end-to-end GPU ConvNet convergence check
 - **Python / C++ Interop Suite:** All 5 verification scripts passed (`NaN` guards, `Sequential` submodule propagation, `PyModule` virtual overrides, `gc.collect()` lifetime safety, and concurrent `DataLoader` iterators).
 
-## Fashion-MNIST GPU Benchmark (`demos/notebook.ipynb`)
+## Fashion-MNIST GPU Benchmark
 
 5-epoch training of `FashionCNN` (`Conv2D` + `BatchNorm2D` + `MaxPool2D` + `Dropout2D(0.1)` + `Linear` + `Dropout(0.25)`, **207,018** trainable parameters) using `TensorDataset`, CUDA `DataLoader` (`batch_size=256`, `shuffle=True`), `SparseCategoricalCrossEntropyLoss`, and GPU `Adam` (`lr=0.002`, `weight_decay=1e-4`) on **5,000** training and **1,000** test images:
 
