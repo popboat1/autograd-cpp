@@ -1,4 +1,5 @@
 #include <iostream>
+#include <limits>
 #include <vector>
 #include <cmath>
 #include <chrono>
@@ -1688,11 +1689,12 @@ int main() {
     // -------------------------------------------------------------
     {
         // 1. Constructor range validation: p must lie in [0.0, 1.0)
-        bool caught_neg = false, caught_one = false, caught_gt_one = false;
+        bool caught_neg = false, caught_one = false, caught_gt_one = false, caught_nan = false;
         try { Dropout d(-0.1); } catch (const std::invalid_argument&) { caught_neg = true; }
         try { Dropout d(1.0); }  catch (const std::invalid_argument&) { caught_one = true; }
         try { Dropout d(1.5); }  catch (const std::invalid_argument&) { caught_gt_one = true; }
-        CHECK_TENSOR(caught_neg && caught_one && caught_gt_one);
+        try { Dropout d(std::numeric_limits<double>::quiet_NaN()); } catch (const std::invalid_argument&) { caught_nan = true; }
+        CHECK_TENSOR(caught_neg && caught_one && caught_gt_one && caught_nan);
 
         // 2. Statistical expectation E[out] ~= x, inverted scaling, and exact grad routing on GPU
         RNG::manual_seed(42);
@@ -1785,6 +1787,11 @@ int main() {
         auto zero_out = zero_drop.forward(eval_in);
         CHECK_TENSOR(zero_out.get() == eval_in.get());
 
+        // no-grad inputs must still mask cleanly without allocating backward state
+        auto nograd_in = std::make_shared<Tensor>(vals, std::vector<size_t>{32, 64}, false, Device::CUDA);
+        auto nograd_out = drop->forward(nograd_in);
+        CHECK_TENSOR(!nograd_out->requires_grad);
+
         std::cout << "[PASS] GPU-native Dropout expectation, grad routing, eval toggle & CPU/GPU parity verified (fwd: "
                   << fwd_ms << " ms, bwd: " << bwd_ms << " ms)\n";
     }
@@ -1802,6 +1809,7 @@ int main() {
 
         CHECK_TENSOR(expect_invalid_arg([]() { Dropout2D(-0.1); }));
         CHECK_TENSOR(expect_invalid_arg([]() { Dropout2D(1.0); }));
+        CHECK_TENSOR(expect_invalid_arg([]() { Dropout2D(std::numeric_limits<double>::quiet_NaN()); }));
 
         auto d2_guard = std::make_shared<Dropout2D>(0.5);
         auto t2d = std::make_shared<Tensor>(std::vector<double>(6, 1.0), std::vector<size_t>{2, 3}, false, Device::CUDA);
@@ -1920,6 +1928,11 @@ int main() {
 
         Dropout2D zero_drop2d(0.0);
         CHECK_TENSOR(zero_drop2d.forward(x_gpu_p).get() == x_gpu_p.get());
+
+        // no-grad inputs must run forward masking cleanly without allocating channel_mask
+        auto nograd_4d = std::make_shared<Tensor>(p_vals, std::vector<size_t>{pB, pC, pH, pW}, false, Device::CUDA);
+        auto nograd_4d_out = drop2d->forward(nograd_4d);
+        CHECK_TENSOR(!nograd_4d_out->requires_grad);
 
         std::cout << "[PASS] GPU-native Dropout2D channel-plane masking, grad routing, eval toggle & CPU/GPU parity verified (fwd: "
                   << fwd_ms << " ms, bwd: " << bwd_ms << " ms)\n";
@@ -2045,6 +2058,42 @@ int main() {
         collect_epoch(epoch1_order);
         collect_epoch(epoch2_order);
         CHECK_TENSOR(epoch1_order != epoch2_order);
+
+        // concurrent iterators must preserve independent permutations and support post-increment
+        auto it1 = cuda_loader.begin();
+        auto it2 = cuda_loader.begin();
+        auto it_end = cuda_loader.end();
+        std::vector<size_t> seen1(N, 0), seen2(N, 0);
+        while (it1 != it_end || it2 != it_end) {
+            if (it1 != it_end) {
+                auto batch1 = *it1++;
+                batch1.second->to(Device::CPU);
+                for (size_t b = 0; b < batch1.second->shape[0]; ++b) {
+                    seen1[static_cast<size_t>(std::llround((*batch1.second->data)[b]))]++;
+                }
+            }
+            if (it2 != it_end) {
+                const auto& batch2 = *it2;
+                auto copy_y = std::make_shared<Tensor>(*batch2.second->data, batch2.second->shape, false, batch2.second->device);
+                copy_y->to(Device::CPU);
+                for (size_t b = 0; b < copy_y->shape[0]; ++b) {
+                    seen2[static_cast<size_t>(std::llround((*copy_y->data)[b]))]++;
+                }
+                ++it2;
+            }
+        }
+        for (size_t i = 0; i < N; ++i) {
+            CHECK_EQUAL(seen1[i], size_t{1});
+            CHECK_EQUAL(seen2[i], size_t{1});
+        }
+
+        // sequential must ignore null children safely across forward, parameters, train, and to
+        Sequential null_safe_seq;
+        null_safe_seq.add(nullptr);
+        null_safe_seq.eval();
+        null_safe_seq.to(Device::CUDA);
+        CHECK_TENSOR(null_safe_seq.parameters().empty());
+        CHECK_TENSOR(null_safe_seq.forward(x_cuda).get() == x_cuda.get());
 
         // multi-epoch vram leak check after cuda allocator warmup
         constexpr size_t leak_N = 256;
