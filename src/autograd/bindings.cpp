@@ -48,6 +48,64 @@ public:
             parameters
         );
     }
+
+    void train(bool mode = true) override {
+        PYBIND11_OVERRIDE(
+            void,
+            Module,
+            train,
+            mode
+        );
+    }
+
+    void to(Device target_device) override {
+        PYBIND11_OVERRIDE(
+            void,
+            Module,
+            to,
+            target_device
+        );
+    }
+};
+
+class PySequential : public Sequential {
+public:
+    using Sequential::Sequential;
+
+    TensorPtr forward(const TensorPtr& input) override {
+        PYBIND11_OVERRIDE(
+            TensorPtr,
+            Sequential,
+            forward,
+            input
+        );
+    }
+
+    std::vector<TensorPtr> parameters() const override {
+        PYBIND11_OVERRIDE(
+            std::vector<TensorPtr>,
+            Sequential,
+            parameters
+        );
+    }
+
+    void train(bool mode = true) override {
+        PYBIND11_OVERRIDE(
+            void,
+            Sequential,
+            train,
+            mode
+        );
+    }
+
+    void to(Device target_device) override {
+        PYBIND11_OVERRIDE(
+            void,
+            Sequential,
+            to,
+            target_device
+        );
+    }
 };
 
 class PyDataset : public Dataset {
@@ -283,9 +341,9 @@ PYBIND11_MODULE(autograd_cpp, m) {
         .def(py::init<size_t, size_t>(),
              py::arg("kernel_size"), py::arg("stride") = 2);
 
-    py::class_<Sequential, Module, std::shared_ptr<Sequential>>(m, "Sequential")
+    py::class_<Sequential, PySequential, Module, std::shared_ptr<Sequential>>(m, "Sequential")
         .def(py::init<>())
-        .def("add", &Sequential::add, py::arg("layer"))
+        .def("add", &Sequential::add, py::arg("layer"), py::keep_alive<1, 2>())
         .def("__call__", [](Sequential& self, const TensorPtr& input) { return self.forward(input); });
 
     py::class_<MLP, Module, std::shared_ptr<MLP>>(m, "MLP")
@@ -368,7 +426,8 @@ PYBIND11_MODULE(autograd_cpp, m) {
              py::arg("batch_size"),
              py::arg("shuffle") = false,
              py::arg("drop_last") = false,
-             py::arg("device") = Device::CPU)
+             py::arg("device") = Device::CPU,
+             py::keep_alive<1, 2>())
         .def("num_batches", &DataLoader::num_batches)
         .def("__len__", &DataLoader::num_batches)
         .def("__iter__", [](DataLoader& self) {

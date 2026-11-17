@@ -1,6 +1,7 @@
 #ifndef MODULE_H
 #define MODULE_H
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -33,15 +34,19 @@ public:
     virtual std::vector<TensorPtr> parameters() const {
         std::vector<TensorPtr> all_params;
         for (const auto& mod : sub_modules) {
+            if (!mod) continue;
             auto mod_params = mod->parameters();
             all_params.insert(all_params.end(), mod_params.begin(), mod_params.end());
         }
         return all_params;
     }
 
-    // registers a child layer dependency
+    // registers a child layer dependency without duplicating entries
     void register_submodule(std::shared_ptr<Module> module) {
-        sub_modules.push_back(std::move(module));
+        if (!module) return;
+        if (std::find(sub_modules.begin(), sub_modules.end(), module) == sub_modules.end()) {
+            sub_modules.push_back(std::move(module));
+        }
     }
 
     // function to clear grads before training step

@@ -23,7 +23,6 @@ private:
     bool shuffle_;
     bool drop_last_;
     Device device_;
-    std::vector<size_t> indices_;
 
     static size_t num_elements(const std::vector<size_t>& shape) {
         size_t total = 1;
@@ -74,11 +73,14 @@ private:
         }
     }
 
-    std::pair<TensorPtr, TensorPtr> collate_batch(size_t batch_idx) const {
+    std::pair<TensorPtr, TensorPtr> collate_batch(
+        const std::vector<size_t>& epoch_indices,
+        size_t batch_idx
+    ) const {
         const size_t start = batch_idx * batch_size_;
-        const size_t cur_bs = std::min(batch_size_, indices_.size() - start);
+        const size_t cur_bs = std::min(batch_size_, epoch_indices.size() - start);
 
-        auto first_sample = dataset_->get(indices_[start]);
+        auto first_sample = dataset_->get(epoch_indices[start]);
         if (!first_sample.first || !first_sample.second) {
             throw std::invalid_argument("DataLoader received null tensor from dataset->get().");
         }
@@ -96,7 +98,7 @@ private:
         copy_sample_to_buffer(first_sample.second, y_sample_shape, y_elems, batch_y_buf, 0, "y");
 
         for (size_t b = 1; b < cur_bs; ++b) {
-            auto [sx, sy] = dataset_->get(indices_[start + b]);
+            auto [sx, sy] = dataset_->get(epoch_indices[start + b]);
             copy_sample_to_buffer(sx, x_sample_shape, x_elems, batch_x_buf, b, "x");
             copy_sample_to_buffer(sy, y_sample_shape, y_elems, batch_y_buf, b, "y");
         }
@@ -123,36 +125,51 @@ public:
         using iterator_category = std::input_iterator_tag;
         using value_type = std::pair<TensorPtr, TensorPtr>;
         using difference_type = std::ptrdiff_t;
-        using pointer = value_type*;
-        using reference = value_type&;
+        using pointer = const value_type*;
+        using reference = const value_type&;
 
     private:
-        const DataLoader* loader_;
-        size_t batch_idx_;
-        // cached lvalue lets callers bind `for (auto& [bx, by] : loader)` cleanly
+        const DataLoader* loader_ = nullptr;
+        // shared per-epoch permutation keeps concurrent iterators isolated
+        std::shared_ptr<const std::vector<size_t>> epoch_indices_;
+        size_t batch_idx_ = 0;
         value_type current_batch_;
 
         void load_batch() {
             // drop previous batch tensors before allocating the next to cap peak vram
             current_batch_ = {};
-            if (loader_ && batch_idx_ < loader_->num_batches()) {
-                current_batch_ = loader_->collate_batch(batch_idx_);
+            if (loader_ && epoch_indices_ && batch_idx_ < loader_->num_batches()) {
+                current_batch_ = loader_->collate_batch(*epoch_indices_, batch_idx_);
             }
         }
 
     public:
-        Iterator(const DataLoader* loader, size_t batch_idx)
-            : loader_(loader), batch_idx_(batch_idx) {
+        Iterator() = default;
+
+        Iterator(
+            const DataLoader* loader,
+            std::shared_ptr<const std::vector<size_t>> epoch_indices,
+            size_t batch_idx
+        )
+            : loader_(loader),
+              epoch_indices_(std::move(epoch_indices)),
+              batch_idx_(batch_idx) {
             load_batch();
         }
 
-        reference operator*() { return current_batch_; }
-        pointer operator->() { return &current_batch_; }
+        reference operator*() const { return current_batch_; }
+        pointer operator->() const { return &current_batch_; }
 
         Iterator& operator++() {
             ++batch_idx_;
             load_batch();
             return *this;
+        }
+
+        Iterator operator++(int) {
+            Iterator tmp = *this;
+            ++(*this);
+            return tmp;
         }
 
         bool operator!=(const Iterator& other) const {
@@ -182,9 +199,6 @@ public:
         if (batch_size_ == 0) {
             throw std::invalid_argument("DataLoader batch_size must be greater than 0.");
         }
-
-        indices_.resize(dataset_->size());
-        std::iota(indices_.begin(), indices_.end(), 0);
     }
 
     size_t num_batches() const {
@@ -195,20 +209,18 @@ public:
         return (n == 0) ? 0 : (n + batch_size_ - 1) / batch_size_;
     }
 
-    Iterator begin() {
+    Iterator begin() const {
         const size_t n = dataset_->size();
-        if (indices_.size() != n) {
-            indices_.resize(n);
-            std::iota(indices_.begin(), indices_.end(), 0);
-        }
+        auto epoch_indices = std::make_shared<std::vector<size_t>>(n);
+        std::iota(epoch_indices->begin(), epoch_indices->end(), 0);
         if (shuffle_ && n > 1) {
-            std::shuffle(indices_.begin(), indices_.end(), RNG::get_engine());
+            std::shuffle(epoch_indices->begin(), epoch_indices->end(), RNG::get_engine());
         }
-        return Iterator(this, 0);
+        return Iterator(this, std::move(epoch_indices), 0);
     }
 
     Iterator end() const {
-        return Iterator(this, num_batches());
+        return Iterator(this, nullptr, num_batches());
     }
 };
 
