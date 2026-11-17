@@ -21,7 +21,18 @@ endif()
 if(MSVC)
     add_compile_options(/O2 /Oi /Ot /GL)
 else()
-    add_compile_options(-O3 -march=native -ffast-math)
+    # preserve ieee-754 nan semantics while enabling native simd, fma, and cuda host openmp
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-O3>
+        $<$<COMPILE_LANGUAGE:CXX>:-march=native>
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-math-errno>
+        $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=fast>
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=native>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fno-math-errno>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffp-contract=fast>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>
+    )
 endif()
 
 # enable link-time optimization

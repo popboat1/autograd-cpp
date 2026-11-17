@@ -208,16 +208,19 @@ TensorPtr SparseCategoricalCrossEntropyLoss::operator()(const TensorPtr& logits,
         double loss_sum = 0.0;
         std::vector<size_t> target_indices(batch_size);
         
-        // extract log probabilities corresponding to the integer target indices
-        #pragma omp parallel for reduction(+:loss_sum)
+        // validate bounds sequentially before openmp region so throwing never terminates
         for (size_t b = 0; b < batch_size; ++b) {
             double t_val = (*targets->data)[b];
             if (t_val < 0.0 || t_val >= static_cast<double>(num_classes)) {
                 throw std::out_of_range("sparse categorical cross entropy loss: target index out of bounds!");
             }
-            size_t target_idx = static_cast<size_t>(t_val);
-            target_indices[b] = target_idx;
-            loss_sum += (*log_probs->data)[b * num_classes + target_idx];
+            target_indices[b] = static_cast<size_t>(t_val);
+        }
+
+        // extract log probabilities corresponding to the integer target indices
+        #pragma omp parallel for reduction(+:loss_sum)
+        for (size_t b = 0; b < batch_size; ++b) {
+            loss_sum += (*log_probs->data)[b * num_classes + target_indices[b]];
         }
         
         // compute negative mean loss scalar

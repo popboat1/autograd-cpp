@@ -3074,12 +3074,16 @@ TensorPtr Tensor::sqrt(){
         double* out_ptr = out->data->data();
         double* in_ptr = active_this->data->data();
 
-        // stateless coordinate resolution for safe parallelization
-        #pragma omp parallel for
-        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
+        // validate non-negativity before openmp region so throwing never terminates
+        for (size_t i = 0; i < total_elements; ++i) {
             if (in_ptr[i] < 0.0) {
                 throw std::runtime_error("sqrt: cannot calculate square root of a negative value");
             }
+        }
+
+        // stateless coordinate resolution for safe parallelization
+        #pragma omp parallel for
+        for (int i = 0; i < static_cast<int>(total_elements); ++i) {
             out_ptr[i] = std::sqrt(in_ptr[i]);
         }
     }

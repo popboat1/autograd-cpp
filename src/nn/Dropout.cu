@@ -35,7 +35,7 @@ __global__ void d_dropout_fwd(
     if(idx >= n) return;
 
     double m = (uniform_01(seed, idx) >= p) ? scale : 0.0;
-    mask[idx] = m;
+    if (mask) mask[idx] = m;
     out[idx] = in[idx] * m;
 }
 
@@ -78,10 +78,14 @@ TensorPtr Dropout::forward(const TensorPtr& input) {
             "dropout",
             Device::CUDA
         );
-    
-        double* raw_mask = nullptr;
-        CUDA_CHECK(cudaMalloc(&raw_mask, total_elements * sizeof(double)));
-        auto d_mask = std::shared_ptr<double>(raw_mask, cuda_utils::CudaDeleter{});
+
+        // skip mask allocation when gradients are disabled
+        std::shared_ptr<double> d_mask = nullptr;
+        if (x->requires_grad) {
+            double* raw_mask = nullptr;
+            CUDA_CHECK(cudaMalloc(&raw_mask, total_elements * sizeof(double)));
+            d_mask = std::shared_ptr<double>(raw_mask, cuda_utils::CudaDeleter{});
+        }
 
         constexpr int block_threads = 256;
         int blocks = cuda_utils::ceil_div(static_cast<int>(total_elements), block_threads);
@@ -91,55 +95,62 @@ TensorPtr Dropout::forward(const TensorPtr& input) {
         );
         CUDA_CHECK(cudaGetLastError());
 
-        std::weak_ptr<Tensor> weak_out = out;
-        std::weak_ptr<Tensor> weak_x = x;
-        out->backward_func = [weak_x, weak_out, total_elements, d_mask, blocks, block_threads]() {
-            auto out_ptr = weak_out.lock();
-            auto x_ptr = weak_x.lock();
-            if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
-            {
-                x_ptr->ensure_grad_allocated();
-                d_dropout_bwd<<<blocks, block_threads>>>(
-                    out_ptr->cuda_grad.get(), x_ptr->cuda_grad.get(), 
-                    d_mask.get(), total_elements
-                );
-                CUDA_CHECK(cudaGetLastError());
-            }
-        };
+        if (x->requires_grad) {
+            std::weak_ptr<Tensor> weak_out = out;
+            std::weak_ptr<Tensor> weak_x = x;
+            out->backward_func = [weak_x, weak_out, total_elements, d_mask, blocks, block_threads]() {
+                auto out_ptr = weak_out.lock();
+                auto x_ptr = weak_x.lock();
+                if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
+                {
+                    x_ptr->ensure_grad_allocated();
+                    d_dropout_bwd<<<blocks, block_threads>>>(
+                        out_ptr->cuda_grad.get(), x_ptr->cuda_grad.get(), 
+                        d_mask.get(), total_elements
+                    );
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            };
+        }
 
         return out;
 
     }  else {
         // cpu path
-        auto mask = std::make_shared<std::vector<double>>(total_elements, 0.0);
+        std::shared_ptr<std::vector<double>> mask = nullptr;
+        if (x->requires_grad) {
+            mask = std::make_shared<std::vector<double>>(total_elements, 0.0);
+        }
         std::vector<double> out_vals(total_elements, 0.0);
 
         #pragma omp parallel for
         for(size_t i = 0; i < total_elements; ++i)
         {
             double m {(uniform_01(seed, i) >= p) ? scale : 0.0};
-            (*mask)[i] = m;
+            if (mask) (*mask)[i] = m;
             out_vals[i] = (*x->data)[i] * m;
         }
 
         auto out = std::make_shared<Tensor>(std::move(out_vals), x->shape, std::vector<TensorPtr>{x}, "dropout", Device::CPU);
 
-        std::weak_ptr<Tensor> weak_out = out;
-        std::weak_ptr<Tensor> weak_x = x;
-        out->backward_func = [weak_x, weak_out, total_elements, mask]() {
-            auto out_ptr = weak_out.lock();
-            auto x_ptr = weak_x.lock();
-            if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
-            {
-                x_ptr->ensure_grad_allocated();
-
-                #pragma omp parallel for
-                for(size_t i = 0; i < total_elements; ++i)
+        if (x->requires_grad) {
+            std::weak_ptr<Tensor> weak_out = out;
+            std::weak_ptr<Tensor> weak_x = x;
+            out->backward_func = [weak_x, weak_out, total_elements, mask]() {
+                auto out_ptr = weak_out.lock();
+                auto x_ptr = weak_x.lock();
+                if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
                 {
-                    (*x_ptr->grad)[i] += (*out_ptr->grad)[i] * (*mask)[i];
+                    x_ptr->ensure_grad_allocated();
+
+                    #pragma omp parallel for
+                    for(size_t i = 0; i < total_elements; ++i)
+                    {
+                        (*x_ptr->grad)[i] += (*out_ptr->grad)[i] * (*mask)[i];
+                    }
                 }
-            }
-        };
+            };
+        }
 
         return out;
     }
@@ -169,7 +180,7 @@ __global__ void d_dropout2d_fwd(
 
     out[idx] = in[idx] * m;
 
-    if (idx % spatial_size == 0){
+    if (channel_mask && idx % spatial_size == 0){
         channel_mask[bc] = m;
     }
 }
@@ -243,9 +254,13 @@ TensorPtr Dropout2D::forward(const TensorPtr& input) {
             Device::CUDA
         );
         
-        double* raw_mask = nullptr;
-        CUDA_CHECK(cudaMalloc(&raw_mask, num_planes * sizeof(double)));
-        auto d_channel_mask = std::shared_ptr<double>(raw_mask, cuda_utils::CudaDeleter{});
+        // skip mask allocation when gradients are disabled
+        std::shared_ptr<double> d_channel_mask = nullptr;
+        if (x->requires_grad) {
+            double* raw_mask = nullptr;
+            CUDA_CHECK(cudaMalloc(&raw_mask, num_planes * sizeof(double)));
+            d_channel_mask = std::shared_ptr<double>(raw_mask, cuda_utils::CudaDeleter{});
+        }
 
         // launch forward kernel
         constexpr int block_threads = 256;
@@ -256,26 +271,27 @@ TensorPtr Dropout2D::forward(const TensorPtr& input) {
         );
         CUDA_CHECK(cudaGetLastError());
 
-
         // backward pass on GPU
-        std::weak_ptr<Tensor> weak_out = out;
-        std::weak_ptr<Tensor> weak_x = x;
-        out->backward_func = [
-            weak_x, weak_out, total_elements, d_channel_mask, 
-            spatial_size, blocks, block_threads](){
-            
-            auto out_ptr = weak_out.lock();
-            auto x_ptr = weak_x.lock();
-            if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
-            {
-                x_ptr->ensure_grad_allocated();
-                d_dropout2d_bwd<<<blocks, block_threads>>>(
-                    out_ptr->cuda_grad.get(), x_ptr->cuda_grad.get(), d_channel_mask.get(),
-                    total_elements, spatial_size
-                );
-                CUDA_CHECK(cudaGetLastError());
-            }
-        };
+        if (x->requires_grad) {
+            std::weak_ptr<Tensor> weak_out = out;
+            std::weak_ptr<Tensor> weak_x = x;
+            out->backward_func = [
+                weak_x, weak_out, total_elements, d_channel_mask, 
+                spatial_size, blocks, block_threads](){
+                
+                auto out_ptr = weak_out.lock();
+                auto x_ptr = weak_x.lock();
+                if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
+                {
+                    x_ptr->ensure_grad_allocated();
+                    d_dropout2d_bwd<<<blocks, block_threads>>>(
+                        out_ptr->cuda_grad.get(), x_ptr->cuda_grad.get(), d_channel_mask.get(),
+                        total_elements, spatial_size
+                    );
+                    CUDA_CHECK(cudaGetLastError());
+                }
+            };
+        }
 
         return out;
 
@@ -291,7 +307,7 @@ TensorPtr Dropout2D::forward(const TensorPtr& input) {
         }
 
         #pragma omp parallel for
-        for(size_t i{}; i < total_elements; ++i)
+        for(size_t i = 0; i < total_elements; ++i)
         {
             out_vals[i] = (*x->data)[i] * (*channel_mask)[i / spatial_size];
         }
@@ -304,24 +320,25 @@ TensorPtr Dropout2D::forward(const TensorPtr& input) {
             Device::CPU
         );
 
-
         // backward pass on cpu
-        std::weak_ptr<Tensor> weak_out = out;
-        std::weak_ptr<Tensor> weak_x = x;
-        out->backward_func = [weak_x, weak_out, total_elements, channel_mask, spatial_size](){
-            auto out_ptr = weak_out.lock();
-            auto x_ptr = weak_x.lock();
-            if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
-            {
-                x_ptr->ensure_grad_allocated();
-
-                #pragma omp parallel for
-                for(size_t i{}; i < total_elements; ++i)
+        if (x->requires_grad) {
+            std::weak_ptr<Tensor> weak_out = out;
+            std::weak_ptr<Tensor> weak_x = x;
+            out->backward_func = [weak_x, weak_out, total_elements, channel_mask, spatial_size](){
+                auto out_ptr = weak_out.lock();
+                auto x_ptr = weak_x.lock();
+                if(out_ptr && x_ptr && out_ptr->requires_grad && x_ptr->requires_grad)
                 {
-                    (*x_ptr->grad)[i] += (*out_ptr->grad)[i] * (*channel_mask)[i / spatial_size];
+                    x_ptr->ensure_grad_allocated();
+
+                    #pragma omp parallel for
+                    for(size_t i = 0; i < total_elements; ++i)
+                    {
+                        (*x_ptr->grad)[i] += (*out_ptr->grad)[i] * (*channel_mask)[i / spatial_size];
+                    }
                 }
-            }
-        };
+            };
+        }
 
         return out;
     }
